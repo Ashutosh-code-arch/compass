@@ -121,7 +121,7 @@ To create one:
 ### Step 1 — Get the code and install dependencies
 
 ```bash
-git clone <your-repo-url> compass
+git clone https://github.com/Ashutosh-code-arch/compass.git
 cd compass
 
 npm install          # the backend and CLI
