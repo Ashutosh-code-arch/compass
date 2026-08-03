@@ -1,0 +1,37 @@
+{
+  "name": "opensource-compass",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Repository corpus, maintainer responsiveness, and setup complexity for evaluating OSS contribution opportunities.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "compass": "node --env-file-if-exists=.env ./src/cli.ts",
+    "compass:tsx": "tsx --env-file-if-exists=.env ./src/cli.ts",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "test:tsx": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "migrate": "npm run compass -- migrate",
+    "status": "npm run compass -- status",
+    "serve": "npm run compass -- serve",
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "start": "npm run web:build && npm run serve"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.2",
+    "fastify": "^5.11.0",
+    "pg": "^8.13.1",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "graphql": "^17.0.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

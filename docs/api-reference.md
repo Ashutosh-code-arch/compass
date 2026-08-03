@@ -1,0 +1,485 @@
+# API reference
+
+Base URL: `http://127.0.0.1:8787` by default.
+
+Start it with `npm run serve`, or `npm start` to build and serve the web interface alongside it. Every
+response is JSON.
+
+**No authentication.** This is a single-user tool bound to localhost. `POST /api/decisions` and
+`PUT /api/profile` write to your database, so do not expose it — see
+[Configuration](configuration.md#compass_host).
+
+**Query parameter names match the CLI flags** deliberately, hyphens and all (`min-score`, not
+`minScore`). The CLI is the fastest way to debug the system, and being able to transcribe a failing URL
+into a command line without a translation table is worth the slightly unusual naming.
+
+---
+
+## Contents
+
+- [Reading the shortlist](#reading-the-shortlist)
+- [Explaining one issue](#explaining-one-issue)
+- [Recording decisions](#recording-decisions)
+- [The journal](#the-journal)
+- [Your profile](#your-profile)
+- [Languages](#languages)
+- [The corpus and syncing](#the-corpus-and-syncing)
+- [Utility](#utility)
+- [Errors](#errors)
+
+---
+
+## Reading the shortlist
+
+### `GET /api/shortlist`
+
+The ranked list.
+
+**Query parameters** — all optional:
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `limit` | positive int | 20 | Rows per page |
+| `offset` | int ≥ 0 | 0 | Rows to skip, after ranking and after the per-repo cap |
+| `min-score` | int | 20 | Score threshold. May be 0 or negative |
+| `per-repo` | positive int | 2 | Most rows from any one repository |
+| `language` | string | any | Primary language. Case-insensitive |
+| `labelled` | flag | off | Only issues with an invitation label |
+| `max-setup` | `light` \| `moderate` \| `heavy` | any | Setup ceiling |
+| `min-stars` | positive int | profile | Star floor |
+| `max-stars` | positive int | profile | Star ceiling |
+| `include-dormant` | flag | off | Include projects where nobody answers outside PRs |
+| `fetch-limit` | positive int | 50000 | Rows fetched before ranking. See the `fetch-cap-hit` notice |
+
+Flags accept `?labelled`, `?labelled=true`, `?labelled=1`, or an explicit `?labelled=false`.
+
+`min-stars`, `max-stars` and `max-setup` fall back to your saved profile when not supplied. An explicit
+value always wins, so a thin shortlist can be widened for one look without editing what is saved.
+
+**Example**
+
+```bash
+curl 'http://127.0.0.1:8787/api/shortlist?limit=1&min-score=0'
+```
+
+```json
+{
+  "summary": {
+    "considered": 15,
+    "scoring": 15,
+    "shown": 1,
+    "total": 6,
+    "offset": 0,
+    "repos": 1,
+    "minScore": 0,
+    "perRepo": 2,
+    "limit": 1,
+    "scoreRange": { "min": 64, "max": 104, "median": 104 }
+  },
+  "rows": [
+    {
+      "rank": 1,
+      "score": 104,
+      "issue": {
+        "issueId": 1009,
+        "repoFullName": "hog/monopoly",
+        "number": 100,
+        "title": "Monopoly candidate 0",
+        "htmlUrl": "https://github.com/hog/monopoly/issues/100",
+        "labels": ["good first issue", "documentation"]
+      },
+      "evidence": [
+        { "signal": "invited", "points": 16, "detail": "labelled \"good first issue\"", "about": "issue" },
+        { "signal": "uncontested", "points": 6, "detail": "1 comment", "about": "issue" }
+      ],
+      "subtotals": { "repo": 82, "issue": 22 },
+      "context": {
+        "responsiveness": "responsive",
+        "confidence": "high",
+        "medianHoursResponse": 9,
+        "noResponseRate": 0.07,
+        "setupWeight": "light",
+        "primaryLanguage": "TypeScript",
+        "stars": 2600
+      },
+      "heldBackInRepo": 8
+    }
+  ],
+  "notices": []
+}
+```
+
+**Reading `summary`**
+
+| Field | Meaning |
+|---|---|
+| `considered` | Open, unassigned, unjudged issues that passed the SQL gates |
+| `scoring` | Of those, how many met the score threshold |
+| `total` | Rows available **after the per-repo cap**, across all pages. **Page against this, not `scoring`** |
+| `shown` | Rows in this response |
+| `offset` | Echo of the requested offset |
+| `repos` | Distinct repositories on **this page** |
+| `scoreRange` | Over the scoring set, not the shown set. `null` when nothing scored |
+
+`total` and `scoring` differ for a real reason: the cap holds candidates back, so 400 scoring issues
+concentrated in 30 repositories offer 60 pageable rows at a cap of two, not 400.
+
+**Reading a row**
+
+| Field | Meaning |
+|---|---|
+| `rank` | Absolute position in the capped list. Row 21 is `21` on page two, not `1` |
+| `score` | No units. A sort key, nothing more |
+| `evidence` | **Issue-level lines only**, capped at four. Repository lines are identical for every issue in a project |
+| `subtotals` | Where the score came from, over **all** lines. `evidence` is capped so it cannot be summed to this |
+| `context` | Repository facts as raw values. `null` means not measured, never zero |
+| `heldBackInRepo` | Further scoring issues in this repository the cap held back |
+
+**Notices**
+
+Structured rather than pre-worded, so each client writes its own remedy:
+
+```json
+{ "kind": "no-candidates" }
+{ "kind": "none-scoring", "considered": 1204, "minScore": 20 }
+{ "kind": "fetch-cap-hit", "fetchLimit": 50000 }
+```
+
+`fetch-cap-hit` matters: it means the ranking saw a recency-ordered subset rather than your corpus.
+**Surface it.** Ignoring it makes a partial ranking look complete.
+
+---
+
+## Explaining one issue
+
+### `GET /api/issues/:owner/:name/:number/why`
+
+The full itemised breakdown. The reference is split across three path segments because
+`owner/name#123` does not survive a single one intact.
+
+```bash
+curl 'http://127.0.0.1:8787/api/issues/acme/widgets/11/why'
+```
+
+```json
+{
+  "issue": {
+    "issueId": 1001,
+    "repoFullName": "acme/widgets",
+    "number": 11,
+    "title": "Fix off-by-one in the pagination helper",
+    "htmlUrl": "https://github.com/acme/widgets/issues/11",
+    "labels": ["good first issue", "bug"]
+  },
+  "score": 102,
+  "repoLines": [
+    { "signal": "responsiveness", "points": 22, "detail": "responsive, median 6h", "about": "repo" },
+    { "signal": "merge rate", "points": 16, "detail": "85% of 21 decided outside PRs merged", "about": "repo" }
+  ],
+  "issueLines": [
+    { "signal": "invited", "points": 16, "detail": "labelled \"good first issue\"", "about": "issue" }
+  ],
+  "repoSubtotal": 80,
+  "issueSubtotal": 22,
+  "unmeasured": ["setup"]
+}
+```
+
+Lines are sorted by points descending within each group. `repoSubtotal + issueSubtotal === score`
+always.
+
+`unmeasured` lists signals that could not contribute because the underlying data is missing. These are
+**absent, not zero** — an unmeasured project is not a bad one.
+
+Works on issues the shortlist rejected, which is most of the reason to call it.
+
+**`404`** when the issue is not a current candidate — closed, assigned, already judged, or in a
+repository that has not been synced:
+
+```json
+{
+  "error": "not a current candidate",
+  "detail": "acme/widgets#11 may be closed, assigned, already judged, or in a repo that is not synced."
+}
+```
+
+---
+
+## Recording decisions
+
+### `POST /api/decisions`
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/decisions \
+  -H 'content-type: application/json' \
+  -d '{"ref":"acme/widgets#11","verdict":"started","predictedHours":4,"reason":"looks self-contained"}'
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `ref` | yes | `owner/name#123` |
+| `verdict` | yes | One of the eight below |
+| `predictedHours` | no | Positive number. Record when you **start** |
+| `actualHours` | no | Positive number. Record when you **finish** |
+| `reason` | no | Free text |
+
+Verdicts: `shortlisted`, `rejected`, `started`, `abandoned`, `submitted`, `merged`, `closed_unmerged`,
+`stalled`.
+
+**`201`** on success, echoing what was stored:
+
+```json
+{
+  "repoFullName": "acme/widgets",
+  "number": 11,
+  "title": "Fix off-by-one in the pagination helper",
+  "verdict": "started",
+  "predictedHours": 4,
+  "actualHours": null,
+  "reason": "looks self-contained"
+}
+```
+
+Any verdict removes the issue from future shortlists. Post several over time for the same issue — they
+accumulate into a trail, and a `predictedHours` followed later by an `actualHours` forms the pair the
+calibration figure is built from.
+
+---
+
+## The journal
+
+### `GET /api/journal`
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `limit` | 30 | Issues to return |
+
+```json
+{
+  "entries": [
+    {
+      "repoFullName": "acme/widgets",
+      "number": 11,
+      "title": "Fix off-by-one in the pagination helper",
+      "trail": ["started", "merged"],
+      "latestVerdict": "merged",
+      "predictedHours": 4,
+      "actualHours": 9,
+      "ratio": 2.25,
+      "reason": "looks self-contained",
+      "lastAt": "2026-08-02T08:39:38.823Z"
+    }
+  ],
+  "complete": 3,
+  "meanRatio": 2.0833333333333335
+}
+```
+
+Aggregated **per issue**, not per row: verdicts arrive as separate events over time, so a per-row view
+could never pair a prediction with its outcome.
+
+| Field | Meaning |
+|---|---|
+| `trail` | Verdicts in the order recorded |
+| `ratio` | `actualHours / predictedHours`, only when both exist. `null` if `predictedHours` is 0 |
+| `complete` | Entries with both a prediction and an outcome |
+| `meanRatio` | **`null` below three complete pairs**, whatever the individual ratios say |
+
+That threshold is enforced server-side on purpose. **Do not average the entries yourself** — an average
+over one or two ratios is the false precision this tool refuses everywhere else. Show progress toward
+three instead.
+
+---
+
+## Your profile
+
+### `GET /api/profile`
+
+```json
+{
+  "profile": {
+    "languagePoints": { "Python": 22 },
+    "topicPoints": { "etl": 9 },
+    "avoidTopics": ["blockchain"],
+    "avoidLabels": ["legacy"],
+    "minStars": 500,
+    "maxStars": 30000,
+    "maxSetupWeight": "moderate"
+  },
+  "defaults": {
+    "languagePoints": { "TypeScript": 14, "Python": 14, "Go": 8, "JavaScript": 6, "Java": 6, "Rust": 4 }
+  },
+  "maxPoints": 25
+}
+```
+
+`defaults` is what an empty profile falls back to, so a settings screen can show it rather than imply
+nothing is happening. `maxPoints` is the validation ceiling, so it can be explained before a user trips
+it.
+
+### `PUT /api/profile`
+
+Whole-row replace, not a patch. Send the complete profile.
+
+```bash
+curl -X PUT http://127.0.0.1:8787/api/profile \
+  -H 'content-type: application/json' \
+  -d '{"languagePoints":{"Python":22},"topicPoints":{"etl":9},"avoidTopics":["blockchain"],"avoidLabels":[],"minStars":500,"maxStars":null,"maxSetupWeight":null}'
+```
+
+Every field is optional; omitted fields become empty.
+
+Three rules the server enforces, each returning `400` with the reasoning:
+
+- **Points are capped at ±25.** The largest measured weight is 22 (responsiveness). A preference that
+  outranks every measurement turns the ranking into a filter, and there are already real filters.
+- **Points must be whole numbers.** The breakdown prints them verbatim; a fractional line would imply
+  precision the preference does not have.
+- **Values are rejected, not coerced.** `"fourteen"` is an error. Reading it as 0 would quietly change
+  every ranking with nothing appearing wrong.
+
+**An empty `languagePoints` means the defaults apply.** A non-empty one **replaces them wholesale**
+rather than merging — deleting a language must mean it stops scoring, not that it reverts to its
+default.
+
+---
+
+## Languages
+
+### `GET /api/languages`
+
+Languages present in the corpus, with GitHub's canonical casing and repository counts, most common
+first. Paused repositories are excluded.
+
+```json
+{ "languages": [ { "language": "TypeScript", "repos": 412 }, { "language": "Python", "repos": 388 } ] }
+```
+
+Exists so a client can offer a list instead of a text box. Typing a language was the one place where
+getting the casing wrong returned an empty result that looked like a real answer.
+
+---
+
+## The corpus and syncing
+
+### `GET /api/sync`
+
+Everything needed to render a sync screen.
+
+```json
+{
+  "kinds": ["seed", "repos", "issues", "metrics", "setup"],
+  "active": { "kind": "repos", "startedAt": "2026-08-02T08:39:38.823Z", "options": { "limit": 3 } },
+  "runningElsewhere": [],
+  "tokenConfigured": true,
+  "corpus": {
+    "repos": 1076,
+    "pausedRepos": 193,
+    "issues": 85961,
+    "openIssues": 41203,
+    "reposWithMetrics": 1072,
+    "reposWithSetup": 1072,
+    "staleMetadata": 312,
+    "decisions": 8
+  },
+  "runs": [
+    {
+      "runId": 42,
+      "kind": "repos",
+      "status": "ok",
+      "startedAt": "2026-08-02T08:39:38.823Z",
+      "finishedAt": "2026-08-02T08:52:11.004Z",
+      "reposSeen": 1000,
+      "reposUpserted": 41,
+      "issuesUpserted": 0,
+      "requests": 1000,
+      "notModified": 959,
+      "error": null
+    }
+  ]
+}
+```
+
+`active` is what **this server process** is running. `runningElsewhere` lists rows the database still
+calls `running`, which means either a CLI run in another terminal or a process that died mid-run — the
+server genuinely cannot tell which, and says so rather than guessing.
+
+Run statuses: `running`, `ok`, `failed`, `aborted_budget`. **`aborted_budget` is not a failure** — the
+run stopped before exhausting your GitHub allowance, and watermarks make it resume cleanly.
+
+### `POST /api/sync/:kind`
+
+Starts a scan. `:kind` is one of `seed`, `repos`, `issues`, `metrics`, `setup`.
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/sync/repos \
+  -H 'content-type: application/json' -d '{"limit":500,"staleHours":24}'
+```
+
+| Field | Applies to | Meaning |
+|---|---|---|
+| `limit` | all | Repositories to process. For `seed`, pages per search |
+| `repo` | all but `seed` | `owner/name`, one repository only |
+| `staleHours` | `repos` | Skip repositories refreshed more recently |
+| `staleDays` | `metrics`, `setup` | Skip repositories measured more recently |
+
+**`202 Accepted`** — the scan is *under way*, not finished:
+
+```json
+{ "started": { "kind": "repos", "startedAt": "2026-08-02T08:39:38.823Z", "options": { "limit": 500 } } }
+```
+
+Poll `GET /api/sync` for progress. Counters flush every three seconds while a run is in flight.
+
+Three constraints, each deliberate:
+
+- **`409 Conflict` if one is already running.** Scans share one hourly GitHub budget, and `repos` would
+  write the same rows twice. The guard is in-process, so it cannot see a CLI run elsewhere — hence
+  `runningElsewhere`.
+- **No cancellation endpoint.** Nothing here can interrupt an HTTP request already in flight, and
+  offering a stop button that does not stop things would be a lie. Budget exhaustion ends a run
+  cleanly and it resumes next time.
+- **`503` if no `GITHUB_TOKEN` is configured**, checked before starting so a missing token is an
+  actionable message rather than a failed run in your history.
+
+---
+
+## Utility
+
+### `GET /api/health`
+
+```json
+{ "ok": true }
+```
+
+### `GET /api/verdicts`
+
+```json
+{ "verdicts": ["shortlisted", "rejected", "started", "abandoned", "submitted", "merged", "closed_unmerged", "stalled"] }
+```
+
+Served so clients do not keep their own copy of the vocabulary.
+
+---
+
+## Errors
+
+Every error is JSON with an `error` field carrying a message written for a person.
+
+| Status | Means |
+|---|---|
+| `400` | Bad input — unknown verdict, malformed reference, out-of-range points, non-numeric parameter |
+| `404` | No such route, or the issue is not a current candidate |
+| `409` | A sync is already running in this server |
+| `500` | A real server fault. The message is deliberately not on the wire; check the server log |
+| `503` | The server is fine but not configured to reach GitHub |
+
+```json
+{ "error": "languagePoints[\"Rust\"] is 99; keep preferences within ±25 so they rank candidates rather than override the measured signals. Use the filters to exclude." }
+```
+
+**Bad input is refused, not coerced.** `?limit=banana` and `?limit=-1` are both `400`. A parameter
+quietly ignored would produce a plausible-looking answer to a question you did not ask.
+
+An unknown path under `/api/` returns a JSON `404` rather than the app's HTML, so a mistyped endpoint
+fails where the mistake is rather than as a parse error several layers away.

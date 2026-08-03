@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+# Matches at any depth, so it covers both the root install and web/.
+node_modules/
+
+# Lockfiles are COMMITTED, both of them. package-lock.json in the root and in web/
+# pin the exact tree a working build was verified against. Do not add them here.
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+# .env holds DATABASE_URL and GITHUB_TOKEN. Never commit it.
+# .env.example is committed and is the documented template — the negation keeps it
+# safe even though the patterns above would not currently catch it.
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+# Vite builds web/ into the root public/ directory (see web/vite.config.ts).
+# Anchored with a leading slash so a future public/ of source assets elsewhere in
+# the tree is not silently ignored.
+/public/
+dist/
+build/
+*.tsbuildinfo
+
+# Vite's dependency cache
+.vite/
+web/.vite/
+
+# ---------------------------------------------------------------------------
+# Logs and diagnostics
+# ---------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# ---------------------------------------------------------------------------
+# Test and coverage output
+# ---------------------------------------------------------------------------
+coverage/
+.nyc_output/
+*.lcov
+
+# ---------------------------------------------------------------------------
+# Database dumps
+# ---------------------------------------------------------------------------
+# `pg_dump compass | gzip > compass-2026-08-02.sql.gz` produces files that are large
+# and contain a full copy of your corpus. Worth keeping locally, not in git.
+#
+# fixtures/dev_corpus.sql IS committed — it is the small offline corpus the tests and
+# the refactor-diff recipe rely on, so it is excluded from these patterns.
+*.dump
+*.sql.gz
+*.sql.bz2
+compass-*.sql
+pg_dump*.sql
+
+# ---------------------------------------------------------------------------
+# Editors and IDEs
+# ---------------------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# ---------------------------------------------------------------------------
+# Operating system
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------------------------------------------------------
+# Scratch
+# ---------------------------------------------------------------------------
+# Somewhere to put throwaway scripts and output without them showing up in git status.
+tmp/
+temp/
+scratch/
+*.local

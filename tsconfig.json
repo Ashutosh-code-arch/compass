@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    // Node runs these .ts files by erasing types, which cannot handle parameter properties,
+    // enums, namespaces or decorators. This flag makes tsc reject that syntax at typecheck time,
+    // so `npm run compass` can never break the way it would if someone reintroduced one.
+    "erasableSyntaxOnly": true
+  },
+  "include": ["src/**/*.ts"]
+}
