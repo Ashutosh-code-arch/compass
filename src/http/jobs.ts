@@ -25,6 +25,7 @@ import { syncRepos } from '../sync/repos.ts';
 import { syncSetup } from '../sync/setup.ts';
 import { seed } from '../sync/seed.ts';
 import { RUN_KINDS, type RunKind, type RunSummary } from '../sync/run.ts';
+import { addAndPrepare } from '../sync/add.ts';
 
 export { RUN_KINDS, type RunKind };
 
@@ -45,16 +46,84 @@ export interface ActiveJob {
   kind: RunKind;
   startedAt: string;
   options: JobOptions;
+  /** Set when the job is an `add`, so the UI names the project instead of saying "repos". */
+  adding?: string;
 }
 
-let active: (ActiveJob & { promise: Promise<RunSummary> }) | null = null;
+let active: (ActiveJob & { promise: Promise<unknown> }) | null = null;
 
 export class JobBusyError extends Error {}
 export class JobConfigError extends Error {}
 
 export function activeJob(): ActiveJob | null {
   if (!active) return null;
-  return { kind: active.kind, startedAt: active.startedAt, options: active.options };
+  return {
+    kind: active.kind,
+    startedAt: active.startedAt,
+    options: active.options,
+    ...(active.adding !== undefined ? { adding: active.adding } : {}),
+  };
+}
+
+/**
+ * One place for the two preconditions every job shares, so they cannot drift apart.
+ */
+function guard(): void {
+  if (active) {
+    throw new JobBusyError(
+      `A ${active.adding ? `add of ${active.adding}` : `${active.kind} sync`} is already running in ` +
+        `this server, started ${active.startedAt}. Scans share one hourly GitHub budget, so they run ` +
+        `one at a time.`,
+    );
+  }
+  if (!loadConfig().githubToken) {
+    throw new JobConfigError(
+      'No GITHUB_TOKEN is set, so this server cannot reach GitHub. Add one to .env and restart.',
+    );
+  }
+}
+
+/**
+ * The reason the last add failed.
+ *
+ * Surfaced separately because a failed add leaves no useful trace otherwise: the `sync_runs` row says a
+ * `repos` run happened, not that a particular project could not be found.
+ */
+let addError: string | null = null;
+
+export function lastAddError(): string | null {
+  return addError;
+}
+
+export function clearAddError(): void {
+  addError = null;
+}
+
+/**
+ * Adds a project and runs the three scans that make it rankable.
+ *
+ * Shares the lock with the other scans: it fetches issues, metrics and setup for the repository, so
+ * running it alongside a corpus-wide sync would double the request rate against one hourly budget.
+ */
+export async function startAdd(ref: string, metadataOnly = false): Promise<ActiveJob> {
+  guard();
+  const job: ActiveJob = {
+    kind: 'repos',
+    startedAt: new Date().toISOString(),
+    options: {},
+    adding: ref,
+  };
+  const promise = addAndPrepare(ref, metadataOnly ? { metadataOnly: true } : {})
+    .catch((error: unknown) => {
+      // The caller already has its 202, so this is recorded rather than thrown.
+      addError = error instanceof Error ? error.message : String(error);
+      console.error(`[api] add ${ref} failed: ${addError}`);
+    })
+    .finally(() => {
+      active = null;
+    });
+  active = { ...job, promise };
+  return job;
 }
 
 /**
@@ -120,18 +189,7 @@ function runner(kind: RunKind, options: JobOptions): Promise<RunSummary> {
  * down — the outcome is recorded in `sync_runs` either way, which is where the UI reads it.
  */
 export async function startJob(kind: RunKind, options: JobOptions = {}): Promise<ActiveJob> {
-  if (active) {
-    throw new JobBusyError(
-      `A ${active.kind} sync is already running in this server, started ${active.startedAt}. ` +
-        `Syncs share one hourly GitHub budget, so they run one at a time.`,
-    );
-  }
-  if (!loadConfig().githubToken) {
-    throw new JobConfigError(
-      'No GITHUB_TOKEN is set, so this server cannot reach GitHub. Add one to .env and restart.',
-    );
-  }
-
+  guard();
   const job = { kind, startedAt: new Date().toISOString(), options };
   const promise = runner(kind, options)
     .catch((error: unknown) => {
@@ -204,6 +262,76 @@ export async function recentRuns(limit = 12): Promise<RunRecord[]> {
     notModified: row.http_not_modified,
     error: row.error,
   }));
+}
+
+/**
+ * What to do next, given what the corpus is missing.
+ *
+ * The corpus screen offers five buttons and previously said nothing about which one to press. Four of
+ * them must run in order before anything is rankable, so a newcomer clicking at random gets a screen
+ * that stays empty and no explanation. This is the pipeline expressed as a single instruction.
+ */
+export interface NextStep {
+  kind: RunKind | 'ready';
+  /** Why this is the next thing, in the reader's terms. */
+  because: string;
+}
+
+export function nextStep(corpus: CorpusSummary): NextStep {
+  const active = corpus.repos - corpus.pausedRepos;
+
+  if (corpus.repos === 0) {
+    return {
+      kind: 'seed',
+      because: 'There are no projects yet. Find some, or add one by name.',
+    };
+  }
+  if (corpus.issues === 0) {
+    return {
+      kind: 'issues',
+      because: `${corpus.repos.toLocaleString()} projects, but no issues. Nothing can be ranked yet.`,
+    };
+  }
+  // Metrics before setup: responsiveness is the heaviest signal and a dormant project is gated out
+  // entirely, so measuring attention changes the shortlist far more than reading setup files does.
+  if (corpus.reposWithMetrics === 0) {
+    return {
+      kind: 'metrics',
+      because:
+        'No project has been measured for maintainer attention yet, which is the signal that ' +
+        'matters most. Until this runs, the ranking is mostly guessing.',
+    };
+  }
+  if (corpus.reposWithMetrics < active / 2) {
+    return {
+      kind: 'metrics',
+      because:
+        `Only ${corpus.reposWithMetrics.toLocaleString()} of ${active.toLocaleString()} active ` +
+        `projects have been measured. The unmeasured ones cannot compete fairly.`,
+    };
+  }
+  if (corpus.reposWithSetup < active / 2) {
+    return {
+      kind: 'setup',
+      because:
+        `${corpus.reposWithSetup.toLocaleString()} of ${active.toLocaleString()} projects have had ` +
+        `their setup cost read. Without it, setup contributes nothing either way.`,
+    };
+  }
+  if (corpus.staleMetadata > active / 2) {
+    return {
+      kind: 'repos',
+      because:
+        `${corpus.staleMetadata.toLocaleString()} projects have metadata over a day old. This is ` +
+        `cheap — unchanged projects cost no quota at all.`,
+    };
+  }
+  return {
+    kind: 'ready',
+    because:
+      'The corpus is in good shape. The most useful thing now is not another scan — it is working ' +
+      'an issue and recording how long it actually took.',
+  };
 }
 
 export interface CorpusSummary {

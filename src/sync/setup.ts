@@ -3,7 +3,8 @@ import { db, jsonb } from '../db.ts';
 import { GitHubGraphQL } from '../github/graphql.ts';
 import { mapLimit } from '../github/rest.ts';
 import type { SetupFacts } from '../setup/parse.ts';
-import { buildSetupQuery, mapSetupRepository, type GqlSetupRepository } from './setup_query.ts';
+import { blobVariables, buildSetupQuery, mapSetupRepository, type GqlSetupRepository } from './setup_query.ts';
+import { fetchTree, type RepoTree } from './tree.ts';
 import { withSyncRun, type RunSummary } from './run.ts';
 
 export interface SyncSetupOptions {
@@ -20,6 +21,9 @@ interface SetupTarget {
   owner: string;
   name: string;
   full_name: string;
+  /** The tree is fetched at this ref; 'HEAD' is a safe fallback when metadata is missing. */
+  default_branch: string | null;
+  topics: string[] | null;
 }
 
 /**
@@ -36,13 +40,14 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
   const targets = options.repo
     ? (
         await pool.query<SetupTarget>(
-          `select id, owner, name, full_name from repos where full_name = $1`,
+          `select id, owner, name, full_name, default_branch, topics
+             from repos where full_name = $1`,
           [options.repo],
         )
       ).rows
     : (
         await pool.query<SetupTarget>(
-          `select r.id, r.owner, r.name, r.full_name
+          `select r.id, r.owner, r.name, r.full_name, r.default_branch, r.topics
              from repos r
              left join setup_facts f on f.repo_id = r.id
             where r.sync_state = 'active'
@@ -70,6 +75,9 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
     void loadConfig();
     let inspected = 0;
     let missing = 0;
+    // Repos whose compose file is not at the root: exactly the population the previous root-only
+    // reading got wrong. Worth counting so the fix is measurable rather than asserted.
+    let nestedCompose = 0;
     const distribution: Record<string, number> = {};
 
     const started = Date.now();
@@ -98,18 +106,32 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
     });
 
     async function processBatch(batch: SetupTarget[]): Promise<void> {
-      const query = buildSetupQuery(batch.length);
+      // Phase 1: one REST request per repository for the whole file tree. This is what fixes the
+      // root-only limitation — the paths worth reading are discovered rather than assumed.
+      const trees = new Map<number, RepoTree>();
+      for (const target of batch) {
+        const tree = await fetchTree(ctx.gh, target.owner, target.name, target.default_branch ?? 'HEAD');
+        if (tree) trees.set(target.id, tree);
+      }
+
+      // Phase 2: fetch the blobs at those paths. The query shape stays fixed so batching still works;
+      // the paths travel as variables.
+      const readable = batch.filter((target) => trees.has(target.id));
+      if (readable.length === 0) return;
+
+      const query = buildSetupQuery(readable.length);
       const variables: Record<string, unknown> = {};
-      batch.forEach((target, index) => {
+      readable.forEach((target, index) => {
         variables[`o${index}`] = target.owner;
         variables[`n${index}`] = target.name;
+        Object.assign(variables, blobVariables(index, trees.get(target.id)!));
       });
 
       const { data, partialErrors } = await graphql.query<
         Record<string, GqlSetupRepository | null>
       >(query, variables);
 
-      for (const [index, target] of batch.entries()) {
+      for (const [index, target] of readable.entries()) {
         const repository = data[`r${index}`];
 
         if (!repository) {
@@ -122,7 +144,8 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
           continue;
         }
 
-        const facts = mapSetupRepository(repository);
+        const facts = mapSetupRepository(repository, trees.get(target.id)!, target.topics ?? []);
+        if (facts.composeDepth !== null && facts.composeDepth > 0) nestedCompose += 1;
         await storeSetupFacts(target.id, facts);
         inspected += 1;
         ctx.reposSeen += 1;
@@ -130,8 +153,14 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
       }
     }
 
-    ctx.detail = { inspected, missing, failedBatches, sampleErrors: errors, staleDays, batchSize, distribution };
+    ctx.detail = { inspected, missing, failedBatches, sampleErrors: errors, staleDays, batchSize, distribution, nestedCompose };
     console.log(`Inspected ${inspected}, unreachable ${missing}, failed batches ${failedBatches}`);
+    if (nestedCompose > 0) {
+      console.log(
+        `${nestedCompose} repos keep their compose file outside the root — these read as simpler ` +
+          `than they are before this change.`,
+      );
+    }
     if (Object.keys(distribution).length > 0) {
       console.log(
         `Setup weight: ${Object.entries(distribution)
@@ -170,9 +199,21 @@ const SETUP_COLUMNS = [
   'needs_queue',
   'setup_weight',
   'signals',
+  // Added in 008. Order must match the values array in storeSetupFacts.
+  'frameworks',
+  'compose_depth',
+  'env_depth',
+  'root_files_seen',
 ];
 
-async function storeSetupFacts(repoId: number, facts: SetupFacts): Promise<void> {
+type StoredFacts = SetupFacts & {
+  frameworks: string[];
+  composeDepth: number | null;
+  envDepth: number | null;
+  rootFilesSeen: number;
+};
+
+async function storeSetupFacts(repoId: number, facts: StoredFacts): Promise<void> {
   const values = [
     repoId,
     new Date().toISOString(),
@@ -204,6 +245,10 @@ async function storeSetupFacts(repoId: number, facts: SetupFacts): Promise<void>
       runtimes: facts.runtimes,
       externalServices: facts.externalServices,
     }),
+    facts.frameworks,
+    facts.composeDepth,
+    facts.envDepth,
+    facts.rootFilesSeen,
   ];
 
   const placeholders = values.map((_unused, index) => `$${index + 1}`).join(', ');

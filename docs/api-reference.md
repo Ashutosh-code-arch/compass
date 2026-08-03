@@ -43,7 +43,8 @@ The ranked list.
 | `offset` | int ≥ 0 | 0 | Rows to skip, after ranking and after the per-repo cap |
 | `min-score` | int | 20 | Score threshold. May be 0 or negative |
 | `per-repo` | positive int | 2 | Most rows from any one repository |
-| `language` | string | any | Primary language. Case-insensitive |
+| `stack` | string | any | What it is **built with**: `react`, `django`, `js`. Matches dependencies and topics, never the name. An unrecognised term matches nothing |
+| `language` | string | any | Primary language, matched exactly (case-insensitively) |
 | `labelled` | flag | off | Only issues with an invitation label |
 | `max-setup` | `light` \| `moderate` \| `heavy` | any | Setup ceiling |
 | `min-stars` | positive int | profile | Star floor |
@@ -346,6 +347,50 @@ default.
 
 ## Languages
 
+### `GET /api/stacks`
+
+Frameworks detected in the corpus, with repository counts and display labels.
+
+```json
+{
+  "stacks": [{ "stack": "react", "repos": 412 }, { "stack": "django", "repos": 88 }],
+  "labels": { "react": "React", "django": "Django", "nextjs": "Next.js" }
+}
+```
+
+Derived from declared dependencies plus GitHub topics, so it answers "what is this built with" rather
+than "what is it called". `labels` is served so a client never invents a display name.
+
+Empty until `sync setup` has run — the detection reads manifests that scan already fetches.
+
+### `POST /api/repos`
+
+Adds a project by name and makes it rankable.
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/repos \
+  -H 'content-type: application/json' -d '{"ref":"django/django"}'
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `ref` | yes | `owner/name`, or a pasted GitHub URL |
+| `metadataOnly` | no | Skip the issue, metric and setup scans that normally follow |
+
+**`202 Accepted`** — the row is written first, then its issues, metrics and setup are scanned in the
+background, so it is not yet rankable when this responds:
+
+```json
+{ "started": { "kind": "repos", "startedAt": "2026-08-03T09:14:02.001Z", "options": {}, "adding": "django/django" } }
+```
+
+Poll `GET /api/sync` to watch it finish; `active.adding` names the project. A failure appears as
+`lastAddError`, because a failed add leaves nothing useful in `sync_runs` — that row only records that a
+`repos` run happened, not that a particular project could not be found.
+
+`404` if GitHub has no such public repository. `400` for a malformed reference. `409` if a scan is
+already running.
+
 ### `GET /api/languages`
 
 Languages present in the corpus, with GitHub's canonical casing and repository counts, most common
@@ -369,6 +414,8 @@ Everything needed to render a sync screen.
 ```json
 {
   "kinds": ["seed", "repos", "issues", "metrics", "setup"],
+  "nextStep": { "kind": "metrics", "because": "No project has been measured for maintainer attention yet, which is the signal that matters most." },
+  "lastAddError": null,
   "active": { "kind": "repos", "startedAt": "2026-08-02T08:39:38.823Z", "options": { "limit": 3 } },
   "runningElsewhere": [],
   "tokenConfigured": true,
@@ -400,7 +447,12 @@ Everything needed to render a sync screen.
 }
 ```
 
-`active` is what **this server process** is running. `runningElsewhere` lists rows the database still
+`nextStep` is the pipeline expressed as one instruction, derived from what the corpus is missing. Its
+`kind` is a scan name, or `ready` when nothing needs scanning. **Render it** — five buttons with no
+indication that four of them must run in order is a screen a newcomer cannot act on.
+
+`active` is what **this server process** is running. When it carries `adding`, the job is an
+`add` rather than a corpus-wide scan. `runningElsewhere` lists rows the database still
 calls `running`, which means either a CLI run in another terminal or a process that died mid-run — the
 server genuinely cannot tell which, and says so rather than guessing.
 

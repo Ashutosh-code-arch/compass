@@ -1,3 +1,4 @@
+import { resolveStackTerm } from '../setup/stack.ts';
 import { db } from '../db.ts';
 import type { Candidate } from './score.ts';
 
@@ -28,6 +29,15 @@ export interface ShortlistFilters {
   fetchLimit?: number;
   /** Rows to skip after ranking and capping. Ranking happens in memory, so this is not SQL OFFSET. */
   offset?: number;
+  /**
+   * What the project is built with: "react", "django", "js".
+   *
+   * Resolved by `resolveStackTerm` into detected frameworks and/or language names, then matched
+   * against `setup_facts.frameworks`, `repos.topics` and `repos.primary_language`. Matching the
+   * repository *name* is deliberately not part of it — a repo called `awesome-react-tips` is not a
+   * React project, and that is the failure this filter exists to avoid.
+   */
+  stack?: string;
 }
 
 interface CandidateRow {
@@ -70,6 +80,11 @@ const WEIGHT_RANK: Record<string, number> = { light: 1, moderate: 2, heavy: 3, u
  * combination of good labels and easy setup compensates for nobody reading your PR.
  */
 export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<Candidate[]> {
+  // One term, two possible meanings. "react" is a framework, "js" is a pair of languages, and the
+  // query needs both arrays regardless so the parameter positions stay fixed.
+  const stack = filters.stack
+    ? resolveStackTerm(filters.stack)
+    : { stacks: [] as string[], languages: [] as string[] };
   const rows = (
     await db().query<CandidateRow>(
       `select i.id                        as issue_id,
@@ -120,6 +135,16 @@ export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<C
                or coalesce(($6::jsonb ->> coalesce(f.setup_weight, 'unknown'))::int, 4) <= $5)
           and (not $7::boolean or i.labels && $8::text[])
           and ($10::text is null or r.full_name = $10)
+          -- Stack: any of detected frameworks, declared topics, or primary language.
+          --
+          -- $13 says a stack was ASKED FOR, which is not the same as the resolved arrays being
+          -- non-empty. Inferring it from emptiness made an unrecognised term ("quantum-blockchain")
+          -- indistinguishable from no filter at all, so it returned the entire corpus — a filter that
+          -- silently does not filter is worse than one that errors.
+          and (not $13::boolean
+               or coalesce(f.frameworks, '{}') && $11::text[]
+               or coalesce(r.topics, '{}') && $11::text[]
+               or lower(r.primary_language) = any($12::text[]))
         order by i.updated_at_gh desc
         limit $9`,
       [
@@ -133,6 +158,9 @@ export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<C
         INVITED_LABEL_VARIANTS,
         filters.fetchLimit ?? 50000,
         filters.repoFullName ?? null,
+        stack.stacks,
+        stack.languages.map((language) => language.toLowerCase()),
+        filters.stack !== undefined && filters.stack !== '',
       ],
     )
   ).rows;

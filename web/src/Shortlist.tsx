@@ -326,6 +326,57 @@ function WhyPanel({ repoFullName, number }: { repoFullName: string; number: numb
  * wrong capital produced an empty shortlist that looked like a real answer. The server now matches
  * case-insensitively as well, but the picker is the actual fix: you cannot mistype a list.
  */
+/**
+ * What a project is built with, from evidence rather than from its name.
+ *
+ * The distinction the user asked for: picking "React" must find projects that declare React as a
+ * dependency or carry the topic — not projects with "react" in the repository name. Language and stack
+ * are separate controls because "JS" and "React" are different questions, and one control answering
+ * both is how a filter starts feeling like it is guessing.
+ */
+function StackPicker({
+  value,
+  onChange,
+}: {
+  value: string | undefined;
+  onChange: (stack: string | undefined) => void;
+}) {
+  const query = useQuery({
+    queryKey: ['stacks'],
+    queryFn: () => api.stacks(),
+    staleTime: 5 * 60_000,
+  });
+
+  const stacks = query.data?.stacks ?? [];
+  const labels = query.data?.labels ?? {};
+
+  return (
+    <label className="field">
+      <span className="field__label">Built with</span>
+      <select
+        value={value ?? ''}
+        disabled={query.isPending}
+        onChange={(event) => onChange(event.target.value || undefined)}
+      >
+        <option value="">{query.isPending ? 'loading…' : 'anything'}</option>
+        {value && !stacks.some((entry) => entry.stack === value) && (
+          <option value={value}>{labels[value] ?? value} (none detected yet)</option>
+        )}
+        {stacks.map((entry) => (
+          <option key={entry.stack} value={entry.stack}>
+            {labels[entry.stack] ?? entry.stack} ({entry.repos})
+          </option>
+        ))}
+      </select>
+      {stacks.length === 0 && !query.isPending && (
+        <span className="field__hint">
+          Nothing detected yet — this comes from the setup scan reading each project’s dependencies.
+        </span>
+      )}
+    </label>
+  );
+}
+
 function LanguagePicker({
   value,
   onChange,
@@ -381,6 +432,8 @@ function FilterRail({
     <aside className="filters">
       <div className="filters__group">
         <p className="filters__legend">What counts</p>
+
+        <StackPicker value={filters.stack} onChange={(stack) => patch({ stack })} />
 
         <LanguagePicker
           value={filters.language}

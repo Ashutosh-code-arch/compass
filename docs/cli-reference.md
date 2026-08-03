@@ -62,6 +62,32 @@ They must run in this order the first time, because each depends on the one befo
 seed  →  sync issues  →  sync metrics  →  sync setup
 ```
 
+### `add`
+
+Adds a project you care about, and makes it rankable.
+
+```bash
+npm run compass -- add django/django
+npm run compass -- add https://github.com/django/django     # a pasted URL works
+npm run compass -- add django/django --metadata-only        # just the row, no scans
+```
+
+| Flag | Meaning |
+|---|---|
+| `--metadata-only` | Fetch the repository row only, leaving issues, metrics and setup for later |
+
+By default this also pulls the project's issues, measures its maintainer attention, and reads its setup
+cost — because adding a project and then being shown nothing would be a strange thing to offer. For one
+repository that is only a handful of requests.
+
+Two things worth knowing:
+
+- **A manually added project is never paused by `prune`.** Otherwise `prune --dormant` would quietly
+  undo what you just asked for.
+- **Discovery is not required first.** Before this command existed, the corpus was whatever the seed
+  searches happened to find, and `sync repos --repo django/django` matched nothing and reported
+  `Nothing to refresh` — which reads like success.
+
 ### `seed`
 
 Discovers repositories by running the searches defined in `src/seeds/queries.ts`, which target a
@@ -196,12 +222,34 @@ npm run compass -- shortlist --per-repo 5 --limit 40
 | `--limit N` | 20 | Rows to show |
 | `--min-score N` | 20 | Score threshold. Can be 0 or negative |
 | `--per-repo N` | 2 | Most rows from any one repository |
-| `--language X` | any | Primary language. Case-insensitive — `python` and `Python` both work |
+| `--stack X` | any | **What the project is built with**: `react`, `django`, `js`. See below |
+| `--language X` | any | Primary language, matched exactly (case-insensitively). The strict form |
 | `--labelled` | off | Only issues carrying an invitation label |
 | `--max-setup light\|moderate` | any | Setup ceiling |
 | `--min-stars N` | any | Star floor |
 | `--max-stars N` | any | Star ceiling |
 | `--include-dormant` | off | Include projects where nobody answers outside PRs |
+
+**`--stack` matches evidence, not names.** It reads declared dependencies (`package.json`,
+`pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `pom.xml`) plus GitHub topics. A repository
+called `awesome-react-tips` is not a React project and will not match; one that declares `react` as a
+dependency will, whatever it is called.
+
+```bash
+npm run compass -- shortlist --stack react
+npm run compass -- shortlist --stack django
+npm run compass -- shortlist --stack js        # JavaScript *and* TypeScript projects
+```
+
+`--stack js` and `--stack javascript` both include TypeScript, because someone looking for JavaScript
+work will nearly always take a TypeScript project. `--stack ts` stays narrow, because the implication
+only runs one way. When you want strictly one language, `--language JavaScript` is exact.
+
+An unrecognised term matches **nothing** rather than everything. `/api/stacks` lists what your corpus
+actually contains, and the web interface offers it as a dropdown.
+
+> Frameworks come from the setup scan. Until `sync setup` has run, `--stack react` will find only
+> projects carrying a matching GitHub topic.
 
 **Why `--per-repo` exists.** Repository-level signals dominate the score, so without a cap one good
 project takes over the list. On a real run, twelve of the top twenty came from the same repository, all

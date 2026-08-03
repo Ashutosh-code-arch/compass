@@ -1,82 +1,112 @@
+/**
+ * Blob fetching for setup facts, at paths discovered from the full tree.
+ *
+ * Previously the paths were hardcoded to the repository root, which is the bug in `tree.ts`'s header
+ * comment. Now `src/sync/tree.ts` finds where things actually are, and this requests those paths.
+ *
+ * The query shape stays static so batching still works: each repository gets a fixed number of blob
+ * slots, and the paths arrive as GraphQL variables. An empty slot is sent as `HEAD:`, which resolves to
+ * a Tree rather than a Blob, so `... on Blob` yields null and no conditional query is needed.
+ */
+
 import { RATE_LIMIT_FRAGMENT } from '../github/graphql.ts';
 import { assembleSetupFacts, parseCompose, type SetupFacts } from '../setup/parse.ts';
+import { detectStacks } from '../setup/stack.ts';
+import {
+  findCompose,
+  findEnvTemplate,
+  hasDevcontainerAnywhere,
+  hasDockerfileAnywhere,
+  manifestPaths,
+  rootNames,
+  workflowPaths,
+  type RepoTree,
+} from './tree.ts';
 
 /**
- * Compose filenames in the order the Compose spec resolves them.
- */
-const COMPOSE_CANDIDATES = [
-  'compose.yaml',
-  'compose.yml',
-  'docker-compose.yaml',
-  'docker-compose.yml',
-];
-
-const ENV_CANDIDATES = ['.env.example', '.env.sample', '.env.template', 'env.example'];
-
-/**
- * Conventional workflow filenames. CI in an unusually named file leaves ci_runs_on_pr undetermined
- * rather than false — see ciRunsOnPullRequest.
- */
-const WORKFLOW_CANDIDATES = ['ci.yml', 'ci.yaml', 'test.yml', 'main.yml', 'build.yml'];
-
-/** Alias-safe key: GraphQL aliases must match /[_A-Za-z][_0-9A-Za-z]*​/. */
-function aliasFor(prefix: string, path: string): string {
-  return `${prefix}_${path.replace(/[^0-9A-Za-z]/g, '_')}`;
-}
-
-function blobField(alias: string, path: string): string {
-  return `  ${alias}: object(expression: "HEAD:${path}") { ... on Blob { text isTruncated } }`;
-}
-
-/**
- * One query covers several repositories via aliases.
+ * The files whose *contents* are parsed. Presence-only facts come from the tree and cost nothing.
  *
- * Everything is read at the default branch HEAD. The root tree gives presence for every top-level
- * file in a single field, so blob text is only requested for files whose *contents* are parsed —
- * presence alone never costs a fetch.
+ * Fixed order, because the slot index is part of the variable name.
  */
+export const BLOB_ROLES = [
+  'compose',
+  'env',
+  'packageJson',
+  'nvmrc',
+  'toolVersions',
+  'pyproject',
+  'requirementsTxt',
+  'goMod',
+  'cargoToml',
+  'pomXml',
+  'workflow0',
+  'workflow1',
+  'workflow2',
+] as const;
+
+export type BlobRole = (typeof BLOB_ROLES)[number];
+
+/** How many workflow files are read. Three is enough to find one that triggers on pull_request. */
+const WORKFLOW_SLOTS = 3;
+
+/** An expression that is deliberately not a blob, for unused slots. */
+const NO_FILE = 'HEAD:';
+
 export function buildSetupQuery(batchSize: number): string {
   const declarations: string[] = [];
   const aliases: string[] = [];
 
   for (let index = 0; index < batchSize; index += 1) {
     declarations.push(`$o${index}: String!`, `$n${index}: String!`);
-    aliases.push(`  r${index}: repository(owner: $o${index}, name: $n${index}) { ...RepoSetup }`);
-  }
+    for (const role of BLOB_ROLES) declarations.push(`$e${index}_${role}: String!`);
 
-  const blobs = [
-    ...COMPOSE_CANDIDATES.map((path) => blobField(aliasFor('compose', path), path)),
-    ...ENV_CANDIDATES.map((path) => blobField(aliasFor('env', path), path)),
-    ...WORKFLOW_CANDIDATES.map((path) =>
-      blobField(aliasFor('wf', path), `.github/workflows/${path}`),
-    ),
-    blobField('packageJson', 'package.json'),
-    blobField('nvmrc', '.nvmrc'),
-    blobField('toolVersions', '.tool-versions'),
-    blobField('pyproject', 'pyproject.toml'),
-    blobField('goMod', 'go.mod'),
-    blobField('cargoToml', 'Cargo.toml'),
-    blobField('pomXml', 'pom.xml'),
-  ];
+    const blobs = BLOB_ROLES.map(
+      (role) =>
+        `      ${role}: object(expression: $e${index}_${role}) { ... on Blob { text isTruncated } }`,
+    ).join('\n');
+
+    aliases.push(
+      `  r${index}: repository(owner: $o${index}, name: $n${index}) {\n` +
+        `    nameWithOwner\n${blobs}\n  }`,
+    );
+  }
 
   return `query SetupFacts(${declarations.join(', ')}) {
   ${RATE_LIMIT_FRAGMENT}
 ${aliases.join('\n')}
+}`;
 }
 
-fragment RepoSetup on Repository {
-  nameWithOwner
-  root: object(expression: "HEAD:") {
-    ... on Tree { entries { name type } }
+/**
+ * The variables for one repository's slots, derived from its tree.
+ *
+ * Kept separate from the fetch so the mapping from a tree to a set of paths is testable.
+ */
+export function blobVariables(index: number, tree: RepoTree): Record<string, string> {
+  const first = (paths: string[]): string | null => paths[0] ?? null;
+  const workflows = workflowPaths(tree).slice(0, WORKFLOW_SLOTS);
+
+  const paths: Record<BlobRole, string | null> = {
+    compose: findCompose(tree)?.path ?? null,
+    env: findEnvTemplate(tree)?.path ?? null,
+    packageJson: first(manifestPaths(tree, 'package.json')),
+    nvmrc: first(manifestPaths(tree, '.nvmrc')),
+    toolVersions: first(manifestPaths(tree, '.tool-versions')),
+    pyproject: first(manifestPaths(tree, 'pyproject.toml')),
+    requirementsTxt: first(manifestPaths(tree, 'requirements.txt')),
+    goMod: first(manifestPaths(tree, 'go.mod')),
+    cargoToml: first(manifestPaths(tree, 'Cargo.toml')),
+    pomXml: first(manifestPaths(tree, 'pom.xml')),
+    workflow0: workflows[0] ?? null,
+    workflow1: workflows[1] ?? null,
+    workflow2: workflows[2] ?? null,
+  };
+
+  const variables: Record<string, string> = {};
+  for (const role of BLOB_ROLES) {
+    variables[`e${index}_${role}`] = paths[role] ? `HEAD:${paths[role]}` : NO_FILE;
   }
-  workflows: object(expression: "HEAD:.github/workflows") {
-    ... on Tree { entries { name } }
-  }
-  devcontainer: object(expression: "HEAD:.devcontainer") {
-    ... on Tree { entries { name } }
-  }
-${blobs.join('\n')}
-}`;
+  return variables;
 }
 
 interface GqlBlob {
@@ -84,65 +114,81 @@ interface GqlBlob {
   isTruncated?: boolean | null;
 }
 
-interface GqlTreeEntry {
-  name: string;
-  type?: string;
-}
-
 export interface GqlSetupRepository {
   nameWithOwner: string;
-  root?: { entries?: (GqlTreeEntry | null)[] | null } | null;
-  workflows?: { entries?: (GqlTreeEntry | null)[] | null } | null;
-  devcontainer?: { entries?: (GqlTreeEntry | null)[] | null } | null;
-  [alias: string]: unknown;
+  [role: string]: unknown;
 }
 
-function blob(repository: GqlSetupRepository, alias: string): string | null {
-  const value = repository[alias] as GqlBlob | null | undefined;
+function blob(repository: GqlSetupRepository, role: BlobRole): string | null {
+  const value = repository[role] as GqlBlob | null | undefined;
   if (!value || typeof value.text !== 'string') return null;
   // A truncated blob would give a misleading service or variable count.
   if (value.isTruncated) return null;
   return value.text;
 }
 
-function entryNames(
-  container: { entries?: (GqlTreeEntry | null)[] | null } | null | undefined,
-): string[] {
-  return (container?.entries ?? [])
-    .filter((entry): entry is GqlTreeEntry => entry !== null)
-    .map((entry) => entry.name);
-}
+/**
+ * Assembles the facts for one repository from its tree and its fetched blobs.
+ *
+ * Root-derived facts are still computed from root-level names only, so this change does not re-score
+ * the corpus for reasons unrelated to the bug. Nested findings are folded in additively: a Dockerfile
+ * or devcontainer anywhere counts, and the compose and env files are wherever they were found.
+ */
+export function mapSetupRepository(
+  repository: GqlSetupRepository,
+  tree: RepoTree,
+  topics: string[] = [],
+): SetupFacts & {
+  frameworks: string[];
+  composeDepth: number | null;
+  envDepth: number | null;
+  rootFilesSeen: number;
+} {
+  const composeFound = findCompose(tree);
+  const envFound = findEnvTemplate(tree);
+  const composeText = blob(repository, 'compose');
+  const compose = composeFound && composeText ? parseCompose(composeFound.path, composeText) : null;
 
-export function mapSetupRepository(repository: GqlSetupRepository): SetupFacts {
-  // First compose candidate that is present, in spec resolution order.
-  let compose = null;
-  for (const path of COMPOSE_CANDIDATES) {
-    const text = blob(repository, aliasFor('compose', path));
-    if (text) {
-      compose = parseCompose(path, text);
-      if (compose) break;
-    }
-  }
+  const root = rootNames(tree);
+  const runtimeSources = {
+    packageJson: blob(repository, 'packageJson'),
+    nvmrc: blob(repository, 'nvmrc'),
+    toolVersions: blob(repository, 'toolVersions'),
+    pyproject: blob(repository, 'pyproject'),
+    goMod: blob(repository, 'goMod'),
+    cargoToml: blob(repository, 'cargoToml'),
+    pomXml: blob(repository, 'pomXml'),
+  };
 
-  const treeNames = entryNames(repository.root);
-
-  return assembleSetupFacts({
-    treeNames,
-    // An absent root tree means the query could not see the repository contents at all.
-    treeTruncated: treeNames.length === 0,
+  const facts = assembleSetupFacts({
+    treeNames: root,
+    // Truncation is a property of the listing, not of the root. Carried through so a partial tree
+    // never reads as a confident "nothing here".
+    treeTruncated: tree.truncated || tree.entries.length === 0,
     compose,
-    runtimeSources: {
-      packageJson: blob(repository, 'packageJson'),
-      nvmrc: blob(repository, 'nvmrc'),
-      toolVersions: blob(repository, 'toolVersions'),
-      pyproject: blob(repository, 'pyproject'),
-      goMod: blob(repository, 'goMod'),
-      cargoToml: blob(repository, 'cargoToml'),
-      pomXml: blob(repository, 'pomXml'),
-    },
-    envFiles: ENV_CANDIDATES.map((path) => ({ path, text: blob(repository, aliasFor('env', path)) })),
-    workflowNames: entryNames(repository.workflows),
-    workflowTexts: WORKFLOW_CANDIDATES.map((path) => blob(repository, aliasFor('wf', path))),
-    devcontainerNames: entryNames(repository.devcontainer),
+    runtimeSources,
+    envFiles: envFound ? [{ path: envFound.path, text: blob(repository, 'env') }] : [],
+    workflowNames: workflowPaths(tree).map((path) => path.split('/').pop()!),
+    workflowTexts: [
+      blob(repository, 'workflow0'),
+      blob(repository, 'workflow1'),
+      blob(repository, 'workflow2'),
+    ],
+    devcontainerNames: [],
   });
+
+  return {
+    ...facts,
+    // The whole tree is the honest file count; the root count is kept so the change is measurable.
+    filesSeen: tree.entries.length,
+    rootFilesSeen: root.length,
+    hasDockerfile: facts.hasDockerfile || hasDockerfileAnywhere(tree),
+    hasDevcontainer: facts.hasDevcontainer || hasDevcontainerAnywhere(tree),
+    frameworks: detectStacks(
+      { ...runtimeSources, requirementsTxt: blob(repository, 'requirementsTxt') },
+      topics,
+    ),
+    composeDepth: composeFound?.depth ?? null,
+    envDepth: envFound?.depth ?? null,
+  };
 }

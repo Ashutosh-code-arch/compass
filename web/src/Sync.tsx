@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type RunKind, type RunRecord, type SyncStatus } from './api.ts';
+import { api, type NextStep, type RunKind, type RunRecord, type SyncStatus } from './api.ts';
 
 /**
  * What each scan does and what it costs, in the reader's terms.
@@ -64,6 +64,16 @@ export function Sync() {
     refetchInterval: (q) => (q.state.data?.active ? 2000 : false),
   });
 
+  const add = useMutation({
+    mutationFn: (ref: string) => api.addRepo(ref),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['sync'] });
+      await queryClient.invalidateQueries({ queryKey: ['shortlist'] });
+      await queryClient.invalidateQueries({ queryKey: ['languages'] });
+      await queryClient.invalidateQueries({ queryKey: ['stacks'] });
+    },
+  });
+
   const start = useMutation({
     mutationFn: ({ kind, options }: { kind: RunKind; options: Record<string, number | string> }) =>
       api.startSync(kind, options),
@@ -118,7 +128,16 @@ export function Sync() {
             </div>
           </header>
 
+          <AddProject
+            disabled={!status.tokenConfigured || status.active !== null || add.isPending}
+            pending={add.isPending}
+            error={(add.error as Error | null)?.message ?? status.lastAddError}
+            onAdd={(ref) => add.mutate(ref)}
+          />
+
           <Corpus corpus={status.corpus} />
+
+          {status.active === null && <NextStepBanner next={status.nextStep} />}
 
           {!status.tokenConfigured && (
             <div className="notice">
@@ -134,7 +153,9 @@ export function Sync() {
             <div className="running">
               <p className="running__title">
                 <span className="running__pulse" aria-hidden="true" />
-                {labelFor(status.active.kind)} is running
+                {status.active.adding
+                  ? `Adding ${status.active.adding}`
+                  : `${labelFor(status.active.kind)} is running`}
               </p>
               <p className="notice__body">
                 Started {timeOf(status.active.startedAt)}. It keeps going if you close this tab, and
@@ -201,6 +222,85 @@ export function Sync() {
         </div>
       </main>
     </div>
+  );
+}
+
+/**
+ * The one instruction that was missing.
+ *
+ * Five buttons and no indication that four of them must run in order is a screen a newcomer cannot
+ * act on. This says which one, and why, from what the corpus is actually missing.
+ */
+function NextStepBanner({ next }: { next: NextStep }) {
+  if (next.kind === 'ready') {
+    return (
+      <div className="next next--ready">
+        <p className="next__title">Nothing needs scanning</p>
+        <p className="notice__body">{next.because}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="next">
+      <p className="next__title">
+        <span className="next__badge">Next</span>
+        {labelFor(next.kind)}
+      </p>
+      <p className="notice__body">{next.because}</p>
+    </div>
+  );
+}
+
+/**
+ * Adding a project by name.
+ *
+ * Until this existed the corpus was whatever the discovery searches happened to find, and there was no
+ * way to say "I use Django, show me Django issues". Adding also runs the issue, metric and setup scans
+ * for that one repository, because adding a project and then being shown nothing would be strange.
+ */
+function AddProject({
+  disabled,
+  pending,
+  error,
+  onAdd,
+}: {
+  disabled: boolean;
+  pending: boolean;
+  error: string | null;
+  onAdd: (ref: string) => void;
+}) {
+  const [ref, setRef] = useState('');
+  const submit = (): void => {
+    if (ref.trim() === '') return;
+    onAdd(ref.trim());
+    setRef('');
+  };
+
+  return (
+    <section className="panel">
+      <h2 className="panel__title">Add a project you care about</h2>
+      <p className="panel__note">
+        Paste an owner/name or a GitHub URL. It is fetched immediately, then its issues, maintainer
+        attention and setup cost are measured so it can be ranked alongside everything else. A project
+        added this way is never paused by pruning.
+      </p>
+      <div className="scan__controls">
+        <label className="field" style={{ width: 280 }}>
+          <span className="field__label">Repository</span>
+          <input
+            type="text"
+            value={ref}
+            placeholder="django/django"
+            onChange={(event) => setRef(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && submit()}
+          />
+        </label>
+        <button type="button" className="btn btn--primary" disabled={disabled} onClick={submit}>
+          {pending ? 'Adding…' : 'Add and measure'}
+        </button>
+      </div>
+      {error && <p className="dialog__error">{error}</p>}
+    </section>
   );
 }
 

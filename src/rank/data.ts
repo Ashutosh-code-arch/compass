@@ -66,6 +66,30 @@ export async function getLanguages(): Promise<LanguageCount[]> {
   ).rows.map((row) => ({ language: row.language, repos: Number(row.repos) }));
 }
 
+export interface StackCount {
+  stack: string;
+  repos: number;
+}
+
+/**
+ * Frameworks actually detected in the corpus, most common first.
+ *
+ * Same purpose as getLanguages: the UI offers a list rather than a text box, so "React" cannot be
+ * mistyped into an empty result that looks like a real answer.
+ */
+export async function getStacks(): Promise<StackCount[]> {
+  return (
+    await db().query<{ stack: string; repos: string }>(
+      `select unnest(f.frameworks) as stack, count(*)::text as repos
+         from setup_facts f
+         join repos r on r.id = f.repo_id
+        where r.sync_state = 'active'
+        group by 1
+        order by count(*) desc, 1 asc`,
+    )
+  ).rows.map((row) => ({ stack: row.stack, repos: Number(row.repos) }));
+}
+
 interface ProfileRow {
   language_points: Record<string, number>;
   topic_points: Record<string, number>;

@@ -428,7 +428,14 @@ export function classifySetupWeight(
   >,
 ): SetupFacts['setupWeight'] {
   // No tree means no evidence, which is not the same as a simple project.
-  if (facts.filesSeen === 0) return 'unknown';
+  //
+  // A *truncated* tree is the same problem and used to be unreachable: treeTruncated was defined as
+  // `filesSeen === 0`, so the two conditions coincided and this parameter was never actually read.
+  // Now that the reading walks the whole tree, GitHub can stop listing partway through a very large
+  // repository — and concluding `light` from a partial listing is precisely the wrong answer that the
+  // move away from root-only reading exists to eliminate. Under-reporting is the only direction this
+  // can fail in, so it must not report at all.
+  if (facts.treeTruncated || facts.filesSeen === 0) return 'unknown';
 
   const services = facts.composeServices ?? 0;
   const envVars = facts.envVarCount ?? 0;

@@ -18,6 +18,10 @@ What is built, what is not, and what is worth doing next.
 | Web interface — shortlist, why, decide, journal | Working |
 | Skills profile and reputation gate | Working |
 | Pagination, language picker, sync from the UI | Working |
+| Add a project by name (`add`) | Working |
+| Filter by what a project is built with (`--stack`) | Working |
+| First-run guidance on the corpus screen | Working |
+| Full-tree setup reading | Working |
 
 ---
 
@@ -51,17 +55,15 @@ Everything below is speculative until those rows exist.
 
 ## Known limitations worth fixing
 
-### Setup reads root-level files only
+### ~~Setup reads root-level files only~~ — fixed
 
-**The most significant inaccuracy in the tool.** A project keeping its compose file in `build/`, or its env
-template in `config/`, reads as simpler than it is. `mattermost/mattermost` reads as `light`.
+Migration 008. The reading walks the full tree via `git/trees?recursive=1`, one extra request per
+repository. Compose and env files are found at any depth and `compose_depth` records where.
 
-The fix is a recursive tree listing (`git/trees?recursive=1`) instead of root-only file reads. That has a
-real API-budget dimension — one extra request per repository, and large monorepos return enormous trees, so
-it needs a truncation strategy. `setup_facts.tree_truncated` already exists for that.
+Truncation is handled rather than ignored: a partial listing yields `unknown`, which also fixed a latent
+bug where `classifySetupWeight` accepted `treeTruncated` and never read it.
 
-**This blocks the setup-instructions generator below**, which would otherwise be confidently wrong for
-exactly the complex projects where it matters most.
+**This unblocks the setup-instructions generator**, which is now the most valuable feature left.
 
 ### `report.ts` has not been split
 
@@ -100,7 +102,7 @@ an ordered checklist is deterministic template work:
 > services including Postgres and Kafka; `make test`.
 
 **Do not let it emit invented minute estimates.** That is the false-precision failure the whole project has
-been avoiding. And do the recursive-tree fix first.
+been avoiding. The recursive-tree prerequisite is now done, so this is unblocked.
 
 ### A workflow board
 

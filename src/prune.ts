@@ -93,6 +93,10 @@ export async function prune(options: PruneOptions = {}): Promise<void> {
              where i.repo_id = r.id
                and d.verdict in ('shortlisted', 'started', 'submitted')
           )
+          -- Never pause a repo you asked for by name. A prune run would otherwise quietly undo
+          -- "add django/django" the next time it happened, which is the opposite of what adding a
+          -- project means. Use --unpause, or set sync_state directly, if you really want it gone.
+          and r.discovered_via <> 'manual'
         order by r.stars desc`,
       [dormant, confidences, heavy],
     )

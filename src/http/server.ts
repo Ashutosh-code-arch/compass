@@ -33,13 +33,19 @@ import {
   isRunKind,
   JobBusyError,
   JobConfigError,
+  clearAddError,
+  lastAddError,
+  nextStep,
   recentRuns,
   runningInDatabase,
+  startAdd,
   RUN_KINDS,
   startJob,
   type JobOptions,
 } from './jobs.ts';
-import { getLanguages } from '../rank/data.ts';
+import { getLanguages, getStacks } from '../rank/data.ts';
+import { parseRepoRef, RepoNotFoundError } from '../sync/add.ts';
+import { STACK_LABELS } from '../setup/stack.ts';
 import { loadConfig } from '../config.ts';
 
 /** Bad input is the client's fault; these read as 400 rather than 500. */
@@ -63,6 +69,7 @@ export function shortlistQuery(query: Record<string, unknown>): ShortlistOptions
     limit: positiveInt(get('limit')),
     offset: nonNegativeInt(get('offset')),
     minScore: signedInt(get('min-score')),
+    stack: get('stack'),
     perRepo: positiveInt(get('per-repo')),
     language: get('language'),
     labelledOnly: flag(get('labelled')),
@@ -155,15 +162,49 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
   /** Canonical language names with repo counts, so the UI offers a list instead of a text box. */
   app.get('/api/languages', async () => ({ languages: await getLanguages() }));
 
-  app.get('/api/sync', async () => ({
-    kinds: RUN_KINDS,
-    active: activeJob(),
-    /** Rows the database still calls running: another terminal, or a process that died mid-run. */
-    runningElsewhere: await runningInDatabase(),
-    tokenConfigured: Boolean(loadConfig().githubToken),
-    corpus: await corpusSummary(),
-    runs: await recentRuns(),
+  /** Detected frameworks present in the corpus, with counts, so the UI offers a list. */
+  app.get('/api/stacks', async () => ({
+    stacks: await getStacks(),
+    labels: STACK_LABELS,
   }));
+
+  /**
+   * Adds a project by name and makes it rankable.
+   *
+   * 202 rather than 201: the metadata is written first, but the issue, metric and setup scans that
+   * follow are still running when this responds, so the row exists and is not yet rankable. Poll
+   * /api/sync to watch it finish.
+   */
+  app.post<{ Body: { ref?: unknown; metadataOnly?: unknown } }>(
+    '/api/repos',
+    async (request, reply) => {
+      const ref = typeof request.body?.ref === 'string' ? request.body.ref.trim() : '';
+      if (ref === '') throw new BadRequest('A repository reference is required, as owner/name');
+      // Shape-checked here so an obvious typo is a 400 rather than a background job that fails
+      // somewhere the user has to go looking for.
+      parseRepoRef(ref);
+      clearAddError();
+      const started = await startAdd(ref, request.body?.metadataOnly === true);
+      return reply.code(202).send({ started });
+    },
+  );
+
+  app.get('/api/sync', async () => {
+    const corpus = await corpusSummary();
+    return {
+      kinds: RUN_KINDS,
+      active: activeJob(),
+      /** What to press next, given what the corpus is missing. */
+      nextStep: nextStep(corpus),
+      /** A failed add leaves no useful trace in sync_runs, so it is surfaced separately. */
+      lastAddError: lastAddError(),
+      /** Rows the database still calls running: another terminal, or a process that died mid-run. */
+      runningElsewhere: await runningInDatabase(),
+      tokenConfigured: Boolean(loadConfig().githubToken),
+      corpus,
+      runs: await recentRuns(),
+    };
+  });
 
   app.post<{ Params: { kind: string }; Body: JobOptions }>(
     '/api/sync/:kind',
@@ -235,6 +276,7 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
       error instanceof BadRequest ||
       error instanceof ProfileError ||
       /^Expected |^Unknown verdict |is not in the corpus/.test(message);
+    if (error instanceof RepoNotFoundError) return reply.code(404).send({ error: message });
     if (error instanceof JobBusyError) return reply.code(409).send({ error: message });
     // 503: the server is fine, but it is not configured to reach GitHub.
     if (error instanceof JobConfigError) return reply.code(503).send({ error: message });

@@ -176,10 +176,10 @@ You should see:
 applied 001_init.sql
 applied 002_maintainer_metrics.sql
 ...
-applied 007_profile.sql
+applied 008_stacks_and_full_tree.sql
 ```
 
-Run it again and it will say `Up to date (7 migration(s) applied).` — it is safe to run any number of
+Run it again and it will say `Up to date (8 migration(s) applied).` — it is safe to run any number of
 times.
 
 ### Step 5 — Start the app
@@ -245,6 +245,16 @@ npm run compass -- sync setup --limit 100
 Reads each project's compose files, env templates, task runner and CI config to judge how much work
 it is to get running.
 
+### Or skip all that and add a project you already care about
+
+```bash
+npm run compass -- add django/django
+```
+
+This fetches the project, pulls its issues, measures its maintainers and reads its setup cost — one
+command, ready to rank. Useful when you have a specific project in mind rather than wanting to browse.
+A project added this way is never paused by pruning.
+
 ### Then look at your shortlist
 
 Reload the app, or:
@@ -275,7 +285,7 @@ Four tabs:
 | **Shortlist** | The ranked issues. Filter on the left, click any row for its full score breakdown. |
 | **What you decided** | Every issue you judged, and how your time estimates compared to reality. |
 | **What you want** | Your languages, subjects, things to avoid, and a star range. Changing these re-ranks everything. |
-| **The corpus** | What data you have, and buttons to fetch more. |
+| **The corpus** | What data you have, buttons to fetch more, a field to add a project by name, and a banner saying which scan to run next. |
 
 ### The normal loop
 
@@ -295,6 +305,8 @@ weights stop being guesses.
 Everything the app does, plus some reports the app does not have yet:
 
 ```bash
+npm run compass -- add django/django
+npm run compass -- shortlist --stack react
 npm run compass -- shortlist --language Python --max-setup light
 npm run compass -- why owner/name#123
 npm run compass -- decide owner/name#123 started --hours 4
@@ -324,6 +336,10 @@ behind it. This is the part to trust; the total is just a sort key.
 **The stepped meters** — `responsive`, `light setup`. These are buckets, not percentages, which is why
 they are drawn as discrete cells rather than bars. More lit cells means more of the thing; the colour
 says whether more is good (attention) or costly (setup).
+
+**"Built with" is not a name match.** Filtering by `react` reads declared dependencies and GitHub
+topics, so a project called `awesome-react-tips` will not match and one that quietly depends on React
+will. `js` covers JavaScript *and* TypeScript; `--language JavaScript` is the strict form.
 
 **A dash means not measured.** `median reply —` means Compass has no data, **not** that the reply time
 is zero. Unmeasured is never treated as bad.
@@ -394,8 +410,8 @@ Worth knowing before you rely on it:
 
 - **The scoring weights have never been validated against an outcome.** They are a considered starting
   position, not a model fitted to anything. Recording your decisions is what fixes that.
-- **Setup cost is read from root-level files only.** A project with its compose file in a
-  subdirectory reads as simpler than it is.
+- **Framework detection has a fixed vocabulary** of 34 common frameworks and libraries. A
+  project built on something outside that list shows no "built with" tag — absent, not absent-of-tech.
 - **Single user.** No accounts, no authentication, bound to localhost. Do not put it on a network.
 - **Everything is a snapshot.** Maintainer behaviour changes; a metric from a month ago may be stale.
   Re-run `sync metrics` occasionally.

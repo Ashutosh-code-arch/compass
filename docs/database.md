@@ -17,7 +17,7 @@ npm run migrate
 ```
 
 Safe to run repeatedly. Applied filenames are recorded in `schema_migrations`, so the runner skips what
-it has already done and prints `Up to date (7 migration(s) applied).`
+it has already done and prints `Up to date (8 migration(s) applied).`
 
 | File | What it added |
 |---|---|
@@ -28,6 +28,7 @@ it has already done and prints `Up to date (7 migration(s) applied).`
 | `005_setup_run_kind.sql` | `setup` as a valid `sync_runs.kind` |
 | `006_backfill_cursor.sql` | `repos.issues_backfill_page`, so an interrupted backfill resumes |
 | `007_profile.sql` | `profile` |
+| `008_stacks_and_full_tree.sql` | `setup_facts.frameworks` and the path-depth columns, after the root-only setup reading was found to under-report complex projects |
 
 ### Writing one
 
@@ -55,7 +56,7 @@ One row per repository. The corpus.
 | `id`, `node_id`, `full_name`, `owner`, `name` | GitHub identity |
 | `primary_language`, `topics`, `stars`, `forks` | What the profile and filters match on |
 | `is_archived`, `is_disabled`, `is_fork`, `has_issues` | Gates |
-| `discovered_via` | Which seed query found it. Useful for judging whether a seed is worth keeping |
+| `discovered_via` | Which seed query found it, or `manual` for one added by name. **`prune` never pauses a `manual` row** |
 | `meta_synced_at`, `meta_etag` | Conditional-GET state. A 304 costs no quota |
 | `issues_synced_at` | Watermark handed back to the API as `since` |
 | `issues_backfilled`, `issues_backfill_page` | First-pull progress, so an interrupted backfill resumes |
@@ -116,11 +117,15 @@ One row per repository. The output of `sync setup`.
 | `has_contributing`, `has_readme`, `task_runner` | Mitigations |
 | `ci_workflow_count`, `ci_runs_on_pr` | Can you see your change validated before a human looks |
 | `needs_database`, `needs_cache`, `needs_queue`, `external_services` | Backing services |
+| `frameworks` | Detected frameworks, from dependencies plus matching topics. GIN-indexed. Empty means none detected, not none used |
+| `compose_depth`, `env_depth` | Path depth, 0 for root. **Non-zero rows are ones the old root-only reading missed entirely** |
+| `root_files_seen` | What the root-only reading would have counted, kept so the change is measurable |
 | `setup_weight` | `light` \| `moderate` \| `heavy` \| `unknown` |
 | `signals` | The raw facts behind the verdict |
 
-> **Root-level files only.** A project with its compose file in a subdirectory reads as simpler than it
-> is. The most significant known inaccuracy in the tool — see [Roadmap](roadmap.md).
+> Read from the **whole tree** since migration 008. Compose and env files are found at any depth;
+> root-level facts (Makefile, lockfiles) still come from the root deliberately. A truncated tree yields
+> `unknown` rather than a confident verdict.
 
 ### `decisions`
 

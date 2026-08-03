@@ -127,9 +127,26 @@ export interface RunRecord {
   error: string | null;
 }
 
+export interface StackCount {
+  stack: string;
+  repos: number;
+}
+
+export interface NextStep {
+  kind: RunKind | 'ready';
+  because: string;
+}
+
 export interface SyncStatus {
   kinds: RunKind[];
-  active: { kind: RunKind; startedAt: string; options: Record<string, unknown> } | null;
+  active: {
+    kind: RunKind;
+    startedAt: string;
+    options: Record<string, unknown>;
+    adding?: string;
+  } | null;
+  nextStep: NextStep;
+  lastAddError: string | null;
   runningElsewhere: { runId: number; kind: string; startedAt: string; heartbeatRequests: number }[];
   tokenConfigured: boolean;
   corpus: {
@@ -165,6 +182,8 @@ export interface ProfileEnvelope {
 export interface Filters {
   limit?: number;
   offset?: number;
+  /** What the project is BUILT with: react, django, js. Not a name match. */
+  stack?: string;
   minScore?: number;
   perRepo?: number;
   language?: string;
@@ -187,6 +206,7 @@ export function toQuery(filters: Filters): string {
   set('min-score', filters.minScore);
   set('per-repo', filters.perRepo);
   set('language', filters.language);
+  set('stack', filters.stack);
   set('max-setup', filters.maxSetupWeight);
   set('min-stars', filters.minStars);
   set('max-stars', filters.maxStars);
@@ -227,6 +247,12 @@ export const api = {
     request<JournalView>(`/api/journal?limit=${limit}`),
 
   languages: (): Promise<{ languages: LanguageCount[] }> => request('/api/languages'),
+
+  stacks: (): Promise<{ stacks: StackCount[]; labels: Record<string, string> }> =>
+    request('/api/stacks'),
+
+  addRepo: (ref: string): Promise<unknown> =>
+    request('/api/repos', { method: 'POST', body: JSON.stringify({ ref }) }),
 
   syncStatus: (): Promise<SyncStatus> => request<SyncStatus>('/api/sync'),
 

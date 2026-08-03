@@ -24,7 +24,7 @@ deserve very different amounts of trust.
 | | What it is | How much to trust it |
 |---|---|---|
 | **Maintainer attention** | Derived from 180 days of real pull requests | **Measured.** Corrected through six rounds against a 1,000-repository corpus |
-| **Setup cost** | Derived from files actually in the repository | **Measured**, but only root-level files. See [the limitation](#the-setup-limitation) |
+| **Setup cost** | Derived from files actually in the repository | **Measured** across the whole file tree. See [the caveats](#setup-cost-is-now-read-from-the-whole-tree) |
 | **Issue signals** | Labels, body length, comments, age | **Observed facts, assumed meaning.** That a thin body means a slow start is reasoning, not data |
 | **The weights** | The point values below | **Assumed.** Never validated against an outcome |
 | **Your preferences** | Languages, topics, avoid terms | **Yours.** Not a measurement at all |
@@ -233,15 +233,49 @@ show a dash.
 
 ---
 
-## The setup limitation
+## Filtering by what a project is built with
 
-Setup cost reads **root-level files only.** A project keeping its `docker-compose.yml` in
-`build/`, or its env template in `config/`, reads as simpler than it is.
+Separate from scoring: this is a gate, not a weight.
 
-`mattermost/mattermost` reads as `light`. It is not light.
+`--stack react` reads **declared dependencies** — `package.json`, `pyproject.toml`,
+`requirements.txt`, `go.mod`, `Cargo.toml`, `pom.xml` — plus GitHub topics that match a known name.
+Every one of those files is already fetched for runtime detection, so this costs no extra API budget.
 
-This is the most significant known inaccuracy in the tool. Fixing it means switching to a recursive
-tree listing — see [Roadmap](roadmap.md).
+The point is that it is not a name match. A repository called `awesome-react-tips` is not a React
+project. One that declares `react` and is called something else is.
+
+Three deliberate choices:
+
+- **A fixed vocabulary**, currently 34 entries. "Every dependency" would offer forty thousand filter
+  options and describe a project by its transitive graph, which is not what "I want to work on React"
+  means.
+- **Direct dependencies only.** Transitive ones would report React for anything depending on a
+  component library.
+- **An unrecognised term matches nothing**, not everything. A filter that silently does not filter is
+  worse than one that errors.
+
+`js` and `javascript` both include TypeScript; `ts` does not include JavaScript, because the
+implication runs one way. `--language` remains an exact match when you need strictness.
+
+## Setup cost is now read from the whole tree
+
+**This used to be a root-only reading**, and it was the most significant inaccuracy in the tool: a
+project keeping its `docker-compose.yml` in `build/`, or its env template in `config/`, read as simpler
+than it was. `mattermost/mattermost` read as `light`.
+
+The reading now walks the full file tree. Compose files and env templates are found at any depth,
+shallowest first, and `setup_facts.compose_depth` records where — a non-zero depth is a row the old
+reading got wrong. Vendored and example directories (`node_modules`, `vendor`, `examples`, `docs`) are
+excluded, because an example app's compose file is not how you run the project.
+
+Two things deliberately did **not** change:
+
+- **Root-level facts still come from the root.** Makefile, README, CONTRIBUTING, lockfiles. Widening
+  those would re-score the whole corpus for reasons unrelated to the bug.
+- **A truncated tree yields `unknown`.** GitHub stops listing on very large repositories, and
+  concluding "no compose file" from a partial listing is the same wrong answer in a new costume. This
+  was a latent bug: `treeTruncated` was accepted by `classifySetupWeight` and never read, which was
+  harmless only while it happened to equal `filesSeen === 0`.
 
 ---
 

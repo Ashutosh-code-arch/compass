@@ -4,11 +4,19 @@
 npm install
 npm run web:install
 
-npm test           # ~200 tests, about two seconds, no database needed
+npm test           # ~230 tests, about two seconds, no database needed
 npm run typecheck  # tsc --noEmit
+npm run docs:check # documentation against the source
 ```
 
-Both must pass before anything is considered done.
+All three must pass before anything is considered done.
+
+`docs:check` exists because documentation rots silently and proofreading does not catch it. It verifies
+internal links and anchors, every npm script and CLI flag, every documented endpoint against
+`server.ts`, the weight values quoted in `how-ranking-works.md`, the preference cap, the verdict list,
+the stack vocabulary size, and the migration count. It has caught four real problems: a `--fetch-limit`
+flag documented before it existed, a stale anchor after a heading was renamed, two migration counts left
+behind when an eighth was added, and a "roughly forty" claim when the vocabulary had 34 entries.
 
 ---
 
@@ -233,6 +241,7 @@ obvious next optimisation if it starts to grate.
 ```bash
 npm test
 npm run typecheck
+npm run docs:check
 (cd web && npm run build)     # if you touched the frontend
 ```
 

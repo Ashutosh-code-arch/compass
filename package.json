@@ -13,6 +13,7 @@
     "test": "node --test \"src/**/*.test.ts\"",
     "test:tsx": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
+    "docs:check": "python3 docs/docs-check.py",
     "migrate": "npm run compass -- migrate",
     "status": "npm run compass -- status",
     "serve": "npm run compass -- serve",

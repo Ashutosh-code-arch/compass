@@ -1152,3 +1152,46 @@ button {
   border-color: var(--ink);
   color: var(--surface);
 }
+
+/* ------------------------------------------------------------------ next step */
+
+.next {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--debit);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.next--ready {
+  border-left-color: var(--credit);
+}
+
+.next__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13.5px;
+  margin: 0 0 3px;
+}
+
+.next__badge {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: var(--ink);
+  color: var(--surface);
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+
+.field__hint {
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-faint);
+  margin-top: 3px;
+}

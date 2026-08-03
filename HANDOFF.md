@@ -4,7 +4,7 @@ Working name: `opensource-compass`. Local directory is `opensource-navigator`.
 
 A personal, single-user tool that answers one question: **"should I spend my next five hours on this
 open-source issue?"** CLI, a JSON API, and a React UI. No LLM anywhere.
-~12,600 lines of TypeScript, 194 tests.
+~14,400 lines of TypeScript, 229 tests.
 
 This document is the full context for continuing development in a fresh conversation.
 
@@ -26,6 +26,7 @@ Built and working:
 | 7 | React UI: shortlist, why, decide, journal | done, verified end to end |
 | 8 | Skills profile (§9a) + reputation gate (§9c) | done, verified end to end |
 | 9 | Pagination, language picker, sync-from-UI | done, verified end to end |
+| 10 | `add`, stack filter, first-run guidance, full-tree setup | done, verified end to end |
 
 Live data as of handoff:
 
@@ -52,8 +53,9 @@ contract:
 
 The docs are checked against the source, not just proofread: internal links and anchors, every npm
 script and CLI flag, every documented endpoint against `server.ts`, the verdict list against `view.ts`,
-twenty weight values against `weights.ts`, and the ±25 preference cap against `profile.ts`. **Re-run
-that check after changing a weight, a flag, or an endpoint.** Writing a doc that quietly stops being
+twenty weight values against `weights.ts`, and the ±25 preference cap against `profile.ts`. **`npm run docs:check` runs it.** Re-run
+it after changing a weight, a flag, an endpoint or a migration — it has caught four real problems so
+far, including a flag that was documented before it existed. Writing a doc that quietly stops being
 true is worse than having no doc.
 
 ## 2. Running it
@@ -108,7 +110,7 @@ first. `COMPASS_HOST` / `COMPASS_PORT` override.
 ## 3. Architecture
 
 ```
-migrations/           001..007, plain SQL, applied by a tiny runner
+migrations/           001..008, plain SQL, applied by a tiny runner
 fixtures/             dev_corpus.sql — offline corpus for the diff-verification recipe
 web/                  React + Vite frontend; its own package.json, builds to public/
   src/api.ts          typed client; query-param names mirror the CLI flags
@@ -139,6 +141,12 @@ src/
     map.ts            payload -> row mappers
     run.ts            sync_runs bookkeeping, RUN_KINDS
     seed.ts repos.ts issues.ts metrics.ts metrics_query.ts setup.ts setup_query.ts
+  setup/
+    parse.ts          PURE file content -> setup facts
+    stack.ts          PURE framework detection from manifests + declared topic aliases
+  sync/
+    tree.ts           recursive tree fetch + PURE path classification
+    add.ts            add a project by name, then make it rankable
   rank/
     weights.ts        EVERY ranking tunable, with rationale — still the DEFAULTS under a profile
     profile.ts        PURE: profile shape, validation, and default resolution
@@ -273,6 +281,25 @@ Every one of these came from running against live data, not from reasoning. They
   the pattern only exists *across* issues. `buildRepoContext` derives per-repo facts from the
   candidate set in memory; ≥8 invited issues within 7 days costs 35 points.
 
+**Found in Slice 10:**
+
+- **`classifySetupWeight` accepted `treeTruncated` and never read it.** Harmless only while
+  `treeTruncated` was defined as `filesSeen === 0`, so the two conditions coincided. Once the reading
+  walked the real tree, GitHub's truncation on very large repositories would have produced a confident
+  `light` from a partial listing — the same wrong answer the root-only fix existed to remove. Truncated
+  now yields `unknown`. **A parameter accepted and never read is a latent bug, not dead code.**
+- **An unrecognised `--stack` returned the entire corpus.** The SQL inferred "a stack was requested"
+  from the resolved arrays being non-empty, which is indistinguishable from an unknown term resolving to
+  nothing. A separate boolean now carries the intent. A filter that silently does not filter is worse
+  than one that errors.
+- **`stack=javascript` returned nothing while `stack=js` returned everything.** The alias map was narrow
+  for one spelling and broad for the other. Both include TypeScript now; `ts` stays narrow because the
+  implication runs one way.
+- **`prune --dormant` would have undone `add`.** A manually added project needs
+  `discovered_via = 'manual'` protection, or the next prune quietly pauses the thing you asked for.
+- **Backticks inside a SQL template literal terminate the string.** A `--` comment containing a
+  backticked flag name broke `prune.ts`, and the parser error pointed nowhere near the cause.
+
 **Found while adding the UI controls (Slice 9):**
 
 - **`GITHUB_TOKEN` was required to read the corpus.** `loadConfig()` demanded it, so a database
@@ -333,7 +360,7 @@ Every one of these came from running against live data, not from reasoning. They
 
 Used throughout; worth keeping:
 
-- `npm test` — 194 tests, mostly over the pure modules
+- `npm test` — 229 tests, mostly over the pure modules
 - `npm run typecheck` — strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` +
   `erasableSyntaxOnly` (the last guarantees Node can run the TS without transformation)
 - **SQL is validated without a database** using Python `pglast` (libpg_query, the real Postgres

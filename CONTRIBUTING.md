@@ -9,9 +9,10 @@ migration, an endpoint or a screen.
 npm install && npm run web:install
 npm test
 npm run typecheck
+npm run docs:check
 ```
 
-Both must pass. Then run it against real data and look at the output — the two worst bugs found in this
+All three must pass. Then run it against real data and look at the output — the two worst bugs found in this
 project so far passed every test.
 
 ## Three conventions that matter more than the rest
@@ -29,6 +30,8 @@ network, no clock and no console, so it can be tested against a fixture. See
 ## Before opening a pull request
 
 - `npm test` and `npm run typecheck` pass
+- `npm run docs:check` passes — it verifies the docs against the source, and it fails when you add a
+  flag or endpoint without documenting it
 - `(cd web && npm run build)` if you touched the frontend
 - New judgement is covered by a test that says *why* it would matter if it broke
 - If you changed a weight or a metric, say what evidence prompted it

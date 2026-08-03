@@ -19,11 +19,14 @@ import { syncRepos } from './sync/repos.ts';
 import { syncSetup } from './sync/setup.ts';
 import { decide, journal, shortlist, why } from './rank/render.ts';
 import { serve } from './http/server.ts';
+import { addAndPrepare } from './sync/add.ts';
 
 const USAGE = `
 opensource-compass — corpus, responsiveness, setup cost, ranked shortlist
 
   migrate                            apply pending SQL migrations
+  add owner/name                     add a project you care about, then make it rankable
+      [--metadata-only]              (fetches its issues, metrics and setup by default)
   seed [--dry-run] [--only id,id]    discover repos via the seed queries
        [--max-pages N]
   sync repos [--stale-hours 24]      refresh repo metadata (conditional GETs)
@@ -40,6 +43,7 @@ opensource-compass — corpus, responsiveness, setup cost, ranked shortlist
   sync all                           repos, issues, metrics, then setup
   shortlist [--limit 20] [--min-score 20] [--per-repo 2]
                                      ranked issues, with the evidence for each
+            [--stack react|js|django|...]  what it is BUILT with, from dependencies + topics
             [--language X] [--labelled] [--max-setup light|moderate]
             [--min-stars N] [--max-stars N] [--include-dormant]
             [--fetch-limit 50000]  rows fetched before ranking; a hit cap is reported
@@ -87,6 +91,8 @@ const OPTIONS = {
   'fetch-limit': { type: 'string' },
   'max-stars': { type: 'string' },
   'include-dormant': { type: 'boolean' },
+  stack: { type: 'string' },
+  'metadata-only': { type: 'boolean' },
   labelled: { type: 'boolean' },
   apply: { type: 'boolean' },
   dormant: { type: 'boolean' },
@@ -133,6 +139,13 @@ async function main(): Promise<'listening' | void> {
       await migrate();
       return;
 
+    case 'add': {
+      const ref = positionals[1];
+      if (!ref) throw new Error('Usage: add owner/name');
+      await addAndPrepare(ref, defined({ metadataOnly: values['metadata-only'] }));
+      return;
+    }
+
     case 'status':
       await status();
       return;
@@ -176,6 +189,7 @@ async function main(): Promise<'listening' | void> {
           minScore: signedInt(values['min-score']),
           perRepo: positiveInt(values['per-repo']),
           language: values.language,
+          stack: values.stack,
           labelledOnly: values.labelled,
           includeDormant: values['include-dormant'],
           maxSetupWeight: values['max-setup'],
