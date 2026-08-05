@@ -25,6 +25,18 @@ ${aliases.join('\n')}
 fragment RepoPrs on Repository {
   nameWithOwner
   assignableUsers(first: 50) { nodes { login } }
+  # Queue depth, in the request that was already being made.
+  #
+  # A separate connection rather than a filter over the window below, because that window is the 40
+  # most recent pull requests: counting the open ones inside it would report "40" for a repository with
+  # 900 and be indistinguishable from one that really has 40. totalCount on a filtered connection is
+  # exact. Ordered ascending with first: 1 to get the oldest, because a queue of 200 that turns over
+  # weekly and a queue of 12 whose oldest has sat for three years are different projects and the count
+  # alone cannot tell them apart.
+  openPrs: pullRequests(states: [OPEN], orderBy: { field: CREATED_AT, direction: ASC }, first: 1) {
+    totalCount
+    nodes { number createdAt }
+  }
   pullRequests(first: $prCount, orderBy: { field: CREATED_AT, direction: DESC }, states: [OPEN, CLOSED, MERGED]) {
     nodes {
       number
@@ -91,6 +103,36 @@ export interface GqlRepository {
   /** Users who can be assigned to issues and PRs — i.e. those holding triage or write access. */
   assignableUsers?: { nodes: ({ login: string } | null)[] } | null;
   pullRequests: { nodes: (GqlPullRequest | null)[] };
+  /** Exact open count and the oldest open pull request. Absent on an older cached response shape. */
+  openPrs?: {
+    totalCount: number;
+    nodes: ({ number: number; createdAt: string } | null)[];
+  } | null;
+}
+
+export interface QueueDepth {
+  openPrs: number | null;
+  oldestOpenPrAt: string | null;
+  oldestOpenPrNumber: number | null;
+}
+
+/**
+ * Queue depth from the response, with absence preserved.
+ *
+ * Null rather than 0 when the field is missing: an empty queue and an unmeasured one are different
+ * facts, and a repository reported as having zero open pull requests when nobody looked would be the
+ * flattering version of the same mistake this project keeps refusing to make.
+ */
+export function mapQueueDepth(repository: GqlRepository): QueueDepth {
+  const open = repository.openPrs;
+  if (!open) return { openPrs: null, oldestOpenPrAt: null, oldestOpenPrNumber: null };
+
+  const oldest = open.nodes.find((node) => node !== null) ?? null;
+  return {
+    openPrs: open.totalCount,
+    oldestOpenPrAt: oldest?.createdAt ?? null,
+    oldestOpenPrNumber: oldest?.number ?? null,
+  };
 }
 
 export interface MapOptions {

@@ -7,6 +7,8 @@
  * control to move.
  */
 
+import type { RepoPattern } from './patterns.ts';
+import type { CurrentState } from './view.ts';
 import { formatHours, type ScoreLine } from './score.ts';
 import {
   getJournal,
@@ -88,6 +90,9 @@ function printShortlist(view: ShortlistView): void {
 
     console.log(`      ${evidence}`);
     console.log(`      ${context}`);
+    const current = currentStateLine(row.context.current);
+    if (current) console.log(`      ${current}`);
+    if (row.pattern) console.log(`      ${patternLine(row.pattern)}`);
     console.log(`      ${row.issue.htmlUrl}`);
     if (row.heldBackInRepo > 0) {
       console.log(`      (+${row.heldBackInRepo} more scoring candidates in this repo)`);
@@ -106,6 +111,63 @@ function printShortlist(view: ShortlistView): void {
 
 function inlineLine(line: ScoreLine): string {
   return `${line.points > 0 ? '+' : ''}${line.points} ${line.signal} (${line.detail})`;
+}
+
+/**
+ * The decaying facts, in one line, and only when there is something worth saying.
+ *
+ * A claim verdict always carries its age. An unchecked issue says so explicitly rather than being
+ * silent, because silence here reads as "free" and that is the one misreading this must not invite.
+ */
+function currentStateLine(current: CurrentState): string | null {
+  const parts: string[] = [];
+
+  if (current.claimVerdict !== null) {
+    const age = current.claimAgeDays;
+    const when = age === null ? '' : age === 0 ? ' today' : ` ${age}d ago`;
+    const who =
+      current.claimVerdict === 'contested' && current.claimants !== null
+        ? ` (${current.claimants} asked)`
+        : '';
+    parts.push(`${current.claimVerdict}${who}, checked${when}`);
+  }
+
+  if (current.quietDays !== null && current.quietDays >= 30) {
+    parts.push(`quiet ${current.quietDays}d`);
+  }
+
+  // Skipped when the momentum verdict already cited the queue as its capacity concern. Saying "214
+  // open pull requests waiting · 214 open PRs" is the same fact twice in two voices.
+  const queueAlreadyStated = current.momentumDetail?.includes('open pull requests') === true;
+  if (!queueAlreadyStated && current.openPrTotal !== null && current.openPrTotal >= 20) {
+    const oldest = current.oldestOpenPrDays;
+    parts.push(`${current.openPrTotal} open PRs${oldest === null ? '' : `, oldest ${oldest}d`}`);
+  }
+
+  // Momentum first among the growth facts: a `hype` verdict is the one thing here that should change
+  // your mind before you read anything else.
+  if (current.momentumDetail !== null) parts.unshift(current.momentumDetail);
+
+  if (current.bounty.length > 0) parts.push(`bounty: ${current.bounty.join(', ')}`);
+
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
+/**
+ * Your own history with the project, in one line.
+ *
+ * Worded as a report of what you did, not as advice. The tool has no evidence that six past
+ * rejections predict a seventh, and phrasing it as a recommendation would claim exactly that.
+ */
+function patternLine(pattern: RepoPattern): string {
+  const parts: string[] = [];
+  if (pattern.declined > 0) parts.push(`declined ${pattern.declined} here`);
+  if (pattern.unlanded > 0) parts.push(`${pattern.unlanded} never landed`);
+  const repeated = pattern.repeatedReason;
+  return (
+    `your journal: ${parts.join(', ')}` +
+    (repeated ? `  — ${repeated.count}x "${repeated.reason}"` : '')
+  );
 }
 
 /** Itemised breakdown for a single issue: every line, with the raw value behind it. */
@@ -147,6 +209,10 @@ export async function why(ref: string): Promise<void> {
 
   if (view.unmeasured.length > 0) {
     console.log(`\nNot measured, contributing nothing either way: ${view.unmeasured.join(', ')}.`);
+  }
+  if (view.pattern) {
+    console.log(`\n${patternLine(view.pattern)}`);
+    console.log(`  Not part of the score — your notes, shown next to the arithmetic, not folded in.`);
   }
   console.log(`\nLabels: ${view.issue.labels.length > 0 ? view.issue.labels.join(', ') : 'none'}`);
   console.log(`Weights live in src/rank/weights.ts — disagree with a line and change it there.\n`);

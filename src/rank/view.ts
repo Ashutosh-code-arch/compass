@@ -21,6 +21,10 @@ import {
   type ScoreLine,
 } from './score.ts';
 import { DEFAULT_MIN_SCORE } from './weights.ts';
+import { bountyLabels } from '../claims/detect.ts';
+import { describeMomentum, type RepoMomentum } from '../velocity/index.ts';
+import { resolveWeights } from './weight_sets.ts';
+import type { RepoPattern } from './patterns.ts';
 import type { ResolvedProfile } from './profile.ts';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +48,24 @@ export interface ShortlistViewOptions {
   fetchLimit?: number;
   /** Defaults resolved. Omitting it scores against weights.ts, exactly as before the profile. */
   profile?: ResolvedProfile;
+  /**
+   * What your journal already says about each repository, keyed by full name.
+   *
+   * Passed in rather than derived from the candidates, because by construction it cannot be: a
+   * judged issue is gated out of the candidate set, so every decision this describes belongs to an
+   * issue that is no longer here.
+   */
+  patterns?: Map<string, RepoPattern>;
+  /**
+   * Star velocity and the momentum verdict, keyed by repository full name.
+   *
+   * Passed in rather than derived, because it comes from `repo_stars_history` rather than from anything
+   * on a candidate row — and because a missing key has to stay missing. A repository with no measured
+   * velocity is not a repository that is not growing.
+   */
+  momentum?: Map<string, RepoMomentum>;
+  /** Keep only rows whose repository has this momentum verdict. */
+  momentumFilter?: string;
   now?: Date;
 }
 
@@ -60,6 +82,77 @@ export interface RowContext {
   setupWeight: string | null;
   primaryLanguage: string | null;
   stars: number;
+  /** cla | dco | both | none, or null for unmeasured. A cost to know about, not a score. */
+  contributorAgreement: string | null;
+  /** Facts that decay. Never scored — see `Candidate` for why. */
+  current: CurrentState;
+}
+
+/**
+ * The decaying facts, each carrying what makes it readable.
+ *
+ * Every field here is paired with an age or a denominator, because a claim verdict without a date and a
+ * queue depth without the oldest entry are both the kind of number that looks authoritative and says
+ * nothing.
+ */
+export interface CurrentState {
+  /** Days since anything happened on the issue. Null when the timestamp is missing. */
+  quietDays: number | null;
+  /** Every open pull request in the repository. */
+  openPrTotal: number | null;
+  /** How long the oldest open pull request has waited, in days. */
+  oldestOpenPrDays: number | null;
+  /**
+   * free | claimed | contested | in-progress | stale-claim, or null for NEVER CHECKED.
+   *
+   * Null is emphatically not `free`. An unchecked issue is unknown, and presenting it as available is
+   * exactly the error that makes someone spend an evening on work already in flight.
+   */
+  claimVerdict: string | null;
+  /** How long ago the check was made. A verdict from three weeks ago is nearly worthless. */
+  claimAgeDays: number | null;
+  claimants: number | null;
+  /** Bounty labels, free from data already stored. */
+  bounty: string[];
+  /**
+   * hype | rising | steady | cooling, or null when velocity could not be measured.
+   *
+   * Null is emphatically not `steady`. Velocity needs two samples a week or more apart, so a newly
+   * discovered repository has none — and reporting that as "growing normally" would be an invention.
+   */
+  momentum: string | null;
+  /** The verdict with the numbers that produced it, ready to display. */
+  momentumDetail: string | null;
+  /** Stars gained across the measured span, and how long that span was. */
+  starsGained: number | null;
+  velocitySpanDays: number | null;
+}
+
+function daysSince(iso: string | null, now: Date): number | null {
+  if (iso === null) return null;
+  const days = (now.getTime() - Date.parse(iso)) / 86_400_000;
+  return Number.isFinite(days) ? Math.max(0, Math.round(days)) : null;
+}
+
+export function buildCurrentState(
+  candidate: Candidate,
+  now: Date,
+  momentum?: RepoMomentum,
+): CurrentState {
+  return {
+    momentum: momentum?.momentum.verdict ?? null,
+    momentumDetail:
+      momentum === undefined ? null : describeMomentum(momentum.momentum, momentum.velocity),
+    starsGained: momentum?.velocity?.gained ?? null,
+    velocitySpanDays: momentum?.velocity?.spanDays ?? null,
+    quietDays: daysSince(candidate.updatedAtGh, now),
+    openPrTotal: candidate.openPrTotal,
+    oldestOpenPrDays: daysSince(candidate.oldestOpenPrAt, now),
+    claimVerdict: candidate.claimVerdict,
+    claimAgeDays: daysSince(candidate.claimCheckedAt, now),
+    claimants: candidate.claimClaimants,
+    bounty: bountyLabels(candidate.labels),
+  };
 }
 
 export interface IssueRef {
@@ -92,6 +185,12 @@ export interface ShortlistRow {
   context: RowContext;
   /** Further scoring candidates in this repo that the per-repo cap held back. */
   heldBackInRepo: number;
+  /**
+   * Your own history with this project: declined and unlanded counts, and a repeated reason.
+   *
+   * Null when there is nothing worth saying. Displayed, never scored — see `patterns.ts` for why.
+   */
+  pattern: RepoPattern | null;
 }
 
 /**
@@ -173,6 +272,8 @@ export function assembleShortlist(
 
   // The clock is threaded through rather than defaulted inside rankCandidates: issue age and the
   // issue-mill window are both relative to it, so a fixture cannot be scored reproducibly without it.
+  // Current-state ages need the same clock, for the same reason.
+  const now = options.now ?? new Date();
   const ranked = rankCandidates(candidates, {
     minScore,
     ...(options.now !== undefined ? { now: options.now } : {}),
@@ -182,6 +283,12 @@ export function assembleShortlist(
     return empty([...notices, { kind: 'none-scoring', considered: candidates.length, minScore }]);
   }
 
+  // Applied after ranking rather than in SQL, because momentum lives in a different table and is
+  // computed rather than stored. A row whose velocity is UNMEASURED is excluded by any momentum filter:
+  // asking for `rising` and being shown projects whose growth nobody has measured would answer a
+  // different question.
+  const momentumFilter = options.momentumFilter;
+
   const keptPerRepo = new Map<string, number>();
   const heldPerRepo = new Map<string, number>();
   const kept: ShortlistRow[] = [];
@@ -190,6 +297,10 @@ export function assembleShortlist(
   // `heldBackInRepo` a count of "held back so far", which is not what it claims, and it left no way
   // to know how many pages exist.
   for (const scored of ranked) {
+    if (momentumFilter !== undefined) {
+      const verdict = options.momentum?.get(scored.candidate.repoFullName)?.momentum.verdict ?? null;
+      if (verdict !== momentumFilter) continue;
+    }
     const repo = scored.candidate.repoFullName;
     const already = keptPerRepo.get(repo) ?? 0;
     if (already >= perRepo) {
@@ -220,9 +331,12 @@ export function assembleShortlist(
         setupWeight: candidate.setupWeight,
         primaryLanguage: candidate.primaryLanguage,
         stars: candidate.stars,
+        contributorAgreement: candidate.contributorAgreement,
+        current: buildCurrentState(candidate, now, options.momentum?.get(candidate.repoFullName)),
       },
       // Filled in below: the walk has not finished counting what it holds back.
       heldBackInRepo: 0,
+      pattern: options.patterns?.get(candidate.repoFullName) ?? null,
     });
   }
 
@@ -292,6 +406,8 @@ export interface WhyView {
   issueSubtotal: number;
   /** Signals that could not contribute because the underlying data is missing. */
   unmeasured: string[];
+  /** Your own history with this project. Null when there is nothing worth saying. */
+  pattern: RepoPattern | null;
 }
 
 /** The itemised breakdown for one candidate, split the way the two questions divide. */
@@ -300,8 +416,10 @@ export function buildWhyView(
   context?: RepoContext,
   now = new Date(),
   profile?: ResolvedProfile,
+  pattern: RepoPattern | null = null,
 ): WhyView {
-  const scored = scoreCandidate(candidate, now, context, profile);
+  // The same set the shortlist used, or the breakdown would not add up to the score it explains.
+  const scored = scoreCandidate(candidate, now, context, profile, resolveWeights(profile?.weightSet));
   const byPoints = (a: ScoreLine, b: ScoreLine): number => b.points - a.points;
   const repoLines = scored.lines.filter((line) => line.about === 'repo').sort(byPoints);
   const issueLines = scored.lines.filter((line) => line.about === 'issue').sort(byPoints);
@@ -322,6 +440,7 @@ export function buildWhyView(
     repoSubtotal: subtotals.repo,
     issueSubtotal: subtotals.issue,
     unmeasured: scored.unmeasured,
+    pattern,
   };
 }
 

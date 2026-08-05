@@ -30,6 +30,69 @@ export interface RowContext {
   setupWeight: string | null;
   primaryLanguage: string | null;
   stars: number;
+  /** cla | dco | both | none, or null for unmeasured. */
+  contributorAgreement: string | null;
+  current: CurrentState;
+}
+
+/**
+ * Facts that decay. Mirrors src/rank/view.ts.
+ *
+ * `claimVerdict: null` means NEVER CHECKED. It is not `free`, and the UI must never render it as
+ * though it were — presenting an unknown as available is the whole error this data exists to prevent.
+ */
+export interface CurrentState {
+  quietDays: number | null;
+  openPrTotal: number | null;
+  oldestOpenPrDays: number | null;
+  claimVerdict: string | null;
+  claimAgeDays: number | null;
+  claimants: number | null;
+  bounty: string[];
+  /** hype | rising | steady | cooling, or null when velocity is unmeasured — NOT "not growing". */
+  momentum: string | null;
+  momentumDetail: string | null;
+  starsGained: number | null;
+  velocitySpanDays: number | null;
+}
+
+export interface ClaimEvent {
+  author: string;
+  at: string;
+  why: string;
+  excerpt: string;
+}
+
+export interface ClaimCheck {
+  issueId: number;
+  repoFullName: string;
+  number: number;
+  title: string;
+  htmlUrl: string;
+  checkedAt: string;
+  verdict: 'free' | 'claimed' | 'contested' | 'in-progress' | 'stale-claim';
+  claimants: number;
+  claims: ClaimEvent[];
+  progress: ClaimEvent[];
+  linkedPrs: string[];
+  bountyHint: string | null;
+  bountyLabels: string[];
+  commentsRead: number;
+  commentsTotal: number;
+  fromCache: boolean;
+}
+
+/**
+ * What your own journal says about a project. Mirrors src/rank/patterns.ts.
+ *
+ * Never scored, only shown — the ranking does not learn from these, and the UI must not imply it
+ * does by rendering them as though they were evidence lines.
+ */
+export interface RepoPattern {
+  repoFullName: string;
+  declined: number;
+  unlanded: number;
+  repeatedReason: { reason: string; count: number } | null;
 }
 
 export interface ShortlistRow {
@@ -40,6 +103,7 @@ export interface ShortlistRow {
   subtotals: { repo: number; issue: number };
   context: RowContext;
   heldBackInRepo: number;
+  pattern: RepoPattern | null;
 }
 
 export type ShortlistNotice =
@@ -73,6 +137,7 @@ export interface WhyView {
   repoSubtotal: number;
   issueSubtotal: number;
   unmeasured: string[];
+  pattern: RepoPattern | null;
 }
 
 export type Verdict =
@@ -158,6 +223,9 @@ export interface SyncStatus {
     reposWithSetup: number;
     staleMetadata: number;
     decisions: number;
+    starSamples: number;
+    starSpanDays: number | null;
+    organizations: number;
   };
   runs: RunRecord[];
 }
@@ -179,9 +247,95 @@ export interface ProfileEnvelope {
   maxPoints: number;
 }
 
+/** Mirrors src/org/view.ts. */
+export interface SetupDistribution {
+  light: number;
+  moderate: number;
+  heavy: number;
+  unknown: number;
+}
+
+export interface OrgRow {
+  login: string;
+  displayName: string | null;
+  repos: number;
+  measuredRepos: number;
+  /** Null means nothing here has been measured — not a verdict of `unknown`, which is measured. */
+  responsiveness: string | null;
+  agreeing: number;
+  /** The typical REPOSITORY's median, not the typical pull request's. */
+  medianRepoHoursResponse: number | null;
+  mergeRate: number | null;
+  decidedPrs: number;
+  setup: SetupDistribution;
+  claRepos: number;
+  dcoRepos: number;
+  stars: number;
+  primaryLanguage: string | null;
+  openCandidates: number;
+  candidateRepos: number;
+  momentum: string | null;
+  momentumRepos: number;
+  starsGained: number | null;
+  gsocYears: number[];
+  tagsReviewedAt: string | null;
+}
+
+export interface GsocOutlook {
+  year: number;
+  phase: 'before-announcement' | 'applications' | 'coding' | 'between';
+  daysUntil: number | null;
+  /** True when the driving date was inferred from 2026 rather than published. */
+  estimated: boolean;
+  message: string;
+}
+
+export interface OrgsView {
+  summary: {
+    organizations: number;
+    shown: number;
+    uncovered: number;
+    unmeasured: number;
+    openCandidates: number;
+  };
+  rows: OrgRow[];
+  gsoc: GsocOutlook;
+  notices: string[];
+}
+
+export interface OrgFilters {
+  sort?: 'attention' | 'candidates' | 'name';
+  gsoc?: number | 'any';
+  momentum?: string;
+  language?: string;
+  minRepos?: number;
+  uncoveredOnly?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export function orgsToQuery(filters: OrgFilters): string {
+  const params = new URLSearchParams();
+  if (filters.sort !== undefined) params.set('sort', filters.sort);
+  if (filters.gsoc !== undefined) params.set('gsoc', String(filters.gsoc));
+  if (filters.momentum !== undefined) params.set('momentum', filters.momentum);
+  if (filters.language !== undefined) params.set('language', filters.language);
+  if (filters.minRepos !== undefined) params.set('min-repos', String(filters.minRepos));
+  if (filters.uncoveredOnly === true) params.set('uncovered', 'true');
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit));
+  if (filters.offset !== undefined) params.set('offset', String(filters.offset));
+  return params.toString();
+}
+
 export interface Filters {
   limit?: number;
   offset?: number;
+  /** One organisation, for drilling in from the organisations table. */
+  org?: string;
+  /** Drop issues a claim check found taken. Unchecked issues stay in. */
+  excludeClaimed?: boolean;
+  /** hype | rising | steady | cooling. Excludes repositories whose velocity is unmeasured. */
+  momentum?: string;
   /** What the project is BUILT with: react, django, js. Not a name match. */
   stack?: string;
   minScore?: number;
@@ -214,6 +368,9 @@ export function toQuery(filters: Filters): string {
   // `labelled=false` would be indistinguishable in intent but noisier in the URL.
   if (filters.labelledOnly) set('labelled', true);
   if (filters.includeDormant) set('include-dormant', true);
+  set('org', filters.org);
+  if (filters.excludeClaimed) set('exclude-claimed', true);
+  set('momentum', filters.momentum);
   return params.toString();
 }
 
@@ -239,6 +396,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   shortlist: (filters: Filters): Promise<ShortlistView> =>
     request<ShortlistView>(`/api/shortlist?${toQuery(filters)}`),
+
+  orgs: (filters: OrgFilters): Promise<OrgsView> =>
+    request<OrgsView>(`/api/orgs?${orgsToQuery(filters)}`),
+
+  /** POST: it spends a GitHub request and writes a row, so it must be something the person chose. */
+  checkClaims: (repoFullName: string, number: number): Promise<ClaimCheck> =>
+    request<ClaimCheck>(`/api/issues/${repoFullName}/${number}/claims`, { method: 'POST' }),
 
   why: (repoFullName: string, number: number): Promise<WhyView> =>
     request<WhyView>(`/api/issues/${repoFullName}/${number}/why`),

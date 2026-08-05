@@ -14,6 +14,8 @@
 import { db } from '../db.ts';
 import type { GitHubRest } from '../github/rest.ts';
 import { mapRepoRow, REPO_COLUMNS, REPO_UPDATE_COLUMNS } from './map.ts';
+import { refreshOrganizations } from './orgs.ts';
+import { recordStars } from './stars.ts';
 import { withSyncRun, type RunSummary } from './run.ts';
 import { syncIssues } from './issues.ts';
 import { syncMetrics } from './metrics.ts';
@@ -119,6 +121,13 @@ export async function addRepo(gh: GitHubRest, ref: string): Promise<AddedRepo> {
       where id = $1 and sync_state <> 'gone'`,
     [upserted.rows[0]!.id],
   );
+
+  await recordStars([
+    { repoId: upserted.rows[0]!.id, stars: repo.stargazers_count ?? 0 },
+  ]);
+  // A manually added repository is very often the first one from its organisation, which makes this
+  // the path that most needs to create the row.
+  await refreshOrganizations();
 
   return {
     id: upserted.rows[0]!.id,

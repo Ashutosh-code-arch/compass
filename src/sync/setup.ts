@@ -2,6 +2,7 @@ import { loadConfig } from '../config.ts';
 import { db, jsonb } from '../db.ts';
 import { GitHubGraphQL } from '../github/graphql.ts';
 import { mapLimit } from '../github/rest.ts';
+import type { ContributorAgreement } from '../setup/agreement.ts';
 import type { SetupFacts } from '../setup/parse.ts';
 import { blobVariables, buildSetupQuery, mapSetupRepository, type GqlSetupRepository } from './setup_query.ts';
 import { fetchTree, type RepoTree } from './tree.ts';
@@ -79,6 +80,9 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
     // reading got wrong. Worth counting so the fix is measurable rather than asserted.
     let nestedCompose = 0;
     const distribution: Record<string, number> = {};
+    // CLA is the one setup fact that can rule a project out entirely rather than merely cost time, so
+    // a run reports how many it found rather than leaving it to be discovered a row at a time.
+    const agreements: Record<string, number> = {};
 
     const started = Date.now();
     let done = 0;
@@ -150,10 +154,12 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
         inspected += 1;
         ctx.reposSeen += 1;
         distribution[facts.setupWeight] = (distribution[facts.setupWeight] ?? 0) + 1;
+        const agreement = facts.contributorAgreement ?? 'unmeasured';
+        agreements[agreement] = (agreements[agreement] ?? 0) + 1;
       }
     }
 
-    ctx.detail = { inspected, missing, failedBatches, sampleErrors: errors, staleDays, batchSize, distribution, nestedCompose };
+    ctx.detail = { inspected, missing, failedBatches, sampleErrors: errors, staleDays, batchSize, distribution, nestedCompose, agreements };
     console.log(`Inspected ${inspected}, unreachable ${missing}, failed batches ${failedBatches}`);
     if (nestedCompose > 0) {
       console.log(
@@ -167,6 +173,13 @@ export async function syncSetup(options: SyncSetupOptions = {}): Promise<RunSumm
           .sort((a, b) => b[1] - a[1])
           .map(([weight, count]) => `${weight} ${count}`)
           .join(', ')}`,
+      );
+    }
+    const needsCla = (agreements['cla'] ?? 0) + (agreements['both'] ?? 0);
+    if (needsCla > 0) {
+      console.log(
+        `${needsCla} project(s) mention a Contributor License Agreement — worth knowing before you ` +
+          `write the code, not after.`,
       );
     }
   });
@@ -204,6 +217,10 @@ const SETUP_COLUMNS = [
   'compose_depth',
   'env_depth',
   'root_files_seen',
+  // Added in 011.
+  'contributor_agreement',
+  'agreement_evidence',
+  'contributing_path',
 ];
 
 type StoredFacts = SetupFacts & {
@@ -211,6 +228,9 @@ type StoredFacts = SetupFacts & {
   composeDepth: number | null;
   envDepth: number | null;
   rootFilesSeen: number;
+  contributorAgreement: ContributorAgreement | null;
+  agreementEvidence: string[];
+  contributingPath: string | null;
 };
 
 async function storeSetupFacts(repoId: number, facts: StoredFacts): Promise<void> {
@@ -249,6 +269,9 @@ async function storeSetupFacts(repoId: number, facts: StoredFacts): Promise<void
     facts.composeDepth,
     facts.envDepth,
     facts.rootFilesSeen,
+    facts.contributorAgreement,
+    facts.agreementEvidence,
+    facts.contributingPath,
   ];
 
   const placeholders = values.map((_unused, index) => `$${index + 1}`).join(', ');

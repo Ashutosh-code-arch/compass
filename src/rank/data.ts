@@ -14,6 +14,8 @@ import {
   type SetupWeight,
 } from './profile.ts';
 import { fetchCandidates, type ShortlistFilters } from './candidates.ts';
+import { getRepoMomentum } from '../velocity/data.ts';
+import { buildRepoPatterns, type DecidedIssue, type RepoPattern } from './patterns.ts';
 import type { Candidate, RepoContext } from './score.ts';
 import {
   assembleShortlist,
@@ -37,6 +39,16 @@ export interface ShortlistOptions extends ShortlistFilters {
   offset?: number;
   minScore?: number;
   perRepo?: number;
+  /** hype | rising | steady | cooling. Excludes repositories whose velocity is unmeasured. */
+  momentum?: string;
+  /**
+   * Score against a named weight set for this run only, without changing the saved profile.
+   *
+   * Exists because trying a different set is the natural way to find out whether you want it, and
+   * editing settings to answer that question then editing them back is how people end up with a profile
+   * they did not choose.
+   */
+  weightSet?: string;
 }
 
 export interface LanguageCount {
@@ -98,6 +110,7 @@ interface ProfileRow {
   min_stars: number | null;
   max_stars: number | null;
   max_setup_weight: string | null;
+  weight_set: string | null;
 }
 
 /**
@@ -109,7 +122,7 @@ export async function getProfile(): Promise<Profile> {
   const rows = (
     await db().query<ProfileRow>(
       `select language_points, topic_points, avoid_topics, avoid_labels,
-              min_stars, max_stars, max_setup_weight
+              min_stars, max_stars, max_setup_weight, weight_set
          from profile where id = 1`,
     )
   ).rows;
@@ -123,6 +136,7 @@ export async function getProfile(): Promise<Profile> {
     minStars: row.min_stars,
     maxStars: row.max_stars,
     maxSetupWeight: (row.max_setup_weight as SetupWeight | null) ?? null,
+    weightSet: (row.weight_set as Profile['weightSet']) ?? null,
   };
 }
 
@@ -130,8 +144,8 @@ export async function getProfile(): Promise<Profile> {
 export async function saveProfile(profile: Profile): Promise<Profile> {
   await db().query(
     `insert into profile (id, language_points, topic_points, avoid_topics, avoid_labels,
-                          min_stars, max_stars, max_setup_weight, updated_at)
-     values (1, $1, $2, $3, $4, $5, $6, $7, now())
+                          min_stars, max_stars, max_setup_weight, weight_set, updated_at)
+     values (1, $1, $2, $3, $4, $5, $6, $7, $8, now())
      on conflict (id) do update set
        language_points  = excluded.language_points,
        topic_points     = excluded.topic_points,
@@ -140,6 +154,7 @@ export async function saveProfile(profile: Profile): Promise<Profile> {
        min_stars        = excluded.min_stars,
        max_stars        = excluded.max_stars,
        max_setup_weight = excluded.max_setup_weight,
+       weight_set       = excluded.weight_set,
        updated_at       = now()`,
     [
       JSON.stringify(profile.languagePoints),
@@ -149,6 +164,7 @@ export async function saveProfile(profile: Profile): Promise<Profile> {
       profile.minStars,
       profile.maxStars,
       profile.maxSetupWeight,
+      profile.weightSet,
     ],
   );
   return getProfile();
@@ -175,13 +191,60 @@ function withProfileDefaults(options: ShortlistOptions, profile: Profile): Short
   };
 }
 
+/**
+ * The journal reduced to one row per issue: its latest verdict and its latest written reason.
+ *
+ * Grouped per issue in SQL for the same reason `getJournal` is: verdicts arrive as separate rows over
+ * time, so `started` followed by `abandoned` is one abandonment and counting rows would call it two.
+ *
+ * Scoped to one repository when asked. `why` needs this for a single project, and the whole-corpus
+ * version of the query is the shape of mistake that made expanding one row cost as much as the entire
+ * ranking.
+ */
+export async function getRepoPatterns(repoFullName?: string): Promise<Map<string, RepoPattern>> {
+  const rows = (
+    await db().query<{ full_name: string; latest_verdict: string; reason: string | null }>(
+      `select r.full_name,
+              (array_agg(d.verdict order by d.created_at desc))[1]  as latest_verdict,
+              (array_agg(d.reason order by d.created_at desc)
+                 filter (where d.reason is not null))[1]            as reason
+         from decisions d
+         join issues i on i.id = d.issue_id
+         join repos r on r.id = i.repo_id
+        where ($1::text is null or r.full_name = $1)
+        group by r.full_name, i.id
+        -- Most recent first, so the newest wording of a repeated reason is the one kept.
+        order by max(d.created_at) desc`,
+      [repoFullName ?? null],
+    )
+  ).rows;
+
+  const decided: DecidedIssue[] = rows.map((row) => ({
+    repoFullName: row.full_name,
+    latestVerdict: row.latest_verdict,
+    reason: row.reason,
+  }));
+  return buildRepoPatterns(decided);
+}
+
 /** The ranked list, with the evidence for each row. */
 export async function getShortlist(options: ShortlistOptions = {}): Promise<ShortlistView> {
-  const profile = await getProfile();
+  const stored = await getProfile();
+  const profile: Profile =
+    options.weightSet === undefined
+      ? stored
+      : { ...stored, weightSet: options.weightSet as Profile['weightSet'] };
   const filters = withProfileDefaults(options, profile);
-  const candidates = await fetchCandidates(filters);
+  const [candidates, patterns, momentum] = await Promise.all([
+    fetchCandidates(filters),
+    getRepoPatterns(),
+    getRepoMomentum(),
+  ]);
   return assembleShortlist(candidates, {
     profile: resolveProfile(profile),
+    patterns,
+    momentum,
+    ...(options.momentum === undefined ? {} : { momentumFilter: options.momentum }),
     ...(options.limit !== undefined ? { limit: options.limit } : {}),
     ...(options.offset !== undefined ? { offset: options.offset } : {}),
     ...(options.minScore !== undefined ? { minScore: options.minScore } : {}),
@@ -219,9 +282,23 @@ async function loadOne(
 
 /** Itemised breakdown for a single issue. Null when the issue is not a current candidate. */
 export async function getWhy(ref: string): Promise<WhyView | null> {
-  const [loaded, profile] = await Promise.all([loadOne(ref), getProfile()]);
+  const { fullName } = parseIssueRef(ref);
+  // Scoped to one repository, like the patterns query. The whole-corpus version of this is the shape of
+  // mistake that made expanding one row cost as much as the entire ranking.
+  const [loaded, profile, patterns, momentum] = await Promise.all([
+    loadOne(ref),
+    getProfile(),
+    getRepoPatterns(fullName),
+    getRepoMomentum({ repoFullName: fullName }),
+  ]);
   if (!loaded) return null;
-  return buildWhyView(loaded.candidate, loaded.context, new Date(), resolveProfile(profile));
+  return buildWhyView(
+    loaded.candidate,
+    loaded.context,
+    new Date(),
+    resolveProfile(profile),
+    patterns.get(loaded.candidate.repoFullName) ?? null,
+  );
 }
 
 export interface DecideOptions {

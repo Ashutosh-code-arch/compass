@@ -50,6 +50,10 @@ The ranked list.
 | `min-stars` | positive int | profile | Star floor |
 | `max-stars` | positive int | profile | Star ceiling |
 | `include-dormant` | flag | off | Include projects where nobody answers outside PRs |
+| `org` | string | any | One organisation, matched against the owner (case-insensitively). The drill-down from `/api/orgs` |
+| `exclude-claimed` | flag | off | Drop issues a claim check found taken. **Unchecked issues stay in** — see below |
+| `momentum` | `hype` \| `rising` \| `steady` \| `cooling` | any | Growth crossed with review capacity. Excludes repositories whose velocity is unmeasured. Refused if it is none of these |
+| `weights` | `default` \| `career-leverage` | from profile | Score against a named weight set for this request only |
 | `fetch-limit` | positive int | 50000 | Rows fetched before ranking. See the `fetch-cap-hit` notice |
 
 Flags accept `?labelled`, `?labelled=true`, `?labelled=1`, or an explicit `?labelled=false`.
@@ -101,9 +105,16 @@ curl 'http://127.0.0.1:8787/api/shortlist?limit=1&min-score=0'
         "noResponseRate": 0.07,
         "setupWeight": "light",
         "primaryLanguage": "TypeScript",
-        "stars": 2600
+        "stars": 2600,
+        "contributorAgreement": "dco"
       },
-      "heldBackInRepo": 8
+      "heldBackInRepo": 8,
+      "pattern": {
+        "repoFullName": "hog/monopoly",
+        "declined": 3,
+        "unlanded": 1,
+        "repeatedReason": { "reason": "Needs design discussion first.", "count": 4 }
+      }
     }
   ],
   "notices": []
@@ -135,6 +146,49 @@ concentrated in 30 repositories offer 60 pageable rows at a cap of two, not 400.
 | `subtotals` | Where the score came from, over **all** lines. `evidence` is capped so it cannot be summed to this |
 | `context` | Repository facts as raw values. `null` means not measured, never zero |
 | `heldBackInRepo` | Further scoring issues in this repository the cap held back |
+| `pattern` | What your own journal says about this repository, or `null`. **Not part of the score** |
+
+`context.contributorAgreement` is `cla`, `dco`, `both`, `none`, or `null` for unmeasured — and `null`
+is not a stand-in for `none`. It is carried but never scored: whether a CLA is a blocker or an
+irrelevance is a property of the person, not the project, and a weight would encode one of those as
+universal.
+
+`context.current` carries the facts that **decay**, and none of them is part of `score`:
+
+| Field | Meaning |
+|---|---|
+| `claimVerdict` | `free` \| `claimed` \| `contested` \| `in-progress` \| `stale-claim`, or **`null` for never checked** |
+| `claimAgeDays` | How old the verdict is. A `free` from three weeks ago is nearly worthless |
+| `claimants` | How many distinct people asked |
+| `quietDays` | Days since anything happened on the issue |
+| `openPrTotal` | Every open pull request in the repository. Not the sampled `open_prs` |
+| `oldestOpenPrDays` | How long the oldest open pull request has waited |
+| `bounty` | Bounty labels, free from data already stored |
+| `momentum` | `hype` \| `rising` \| `steady` \| `cooling`, or **`null` for unmeasured** |
+| `momentumDetail` | The verdict with the numbers behind it, ready to display |
+| `starsGained` / `velocitySpanDays` | Stars gained, and the span actually measured |
+
+`momentum: null` means velocity could not be measured — fewer than two star samples a week or more apart —
+and **not** that the repository is not growing. `hype` requires both a growth surge and a measured capacity
+concern; growth alone never produces it.
+
+**`claimVerdict: null` is not `free`.** It means nobody has looked. Rendering an unknown as available is
+the specific error this data exists to prevent, so a client must show absence as absence.
+
+`exclude-claimed` drops only what has been *checked and found taken* (`claimed`, `contested`,
+`in-progress`). Unchecked issues remain, because they are not evidence of anything, and `stale-claim`
+remains because a request nobody followed up on for a fortnight is an available issue again.
+
+**Nothing in `current` is scored, deliberately.** A claim verdict exists only for issues somebody
+checked, so scoring it would order two identical issues differently according to how requests had been
+spent. And no weight in `weights.ts` has yet been validated against an outcome — adding six more
+unvalidated numbers would make the ranking harder to trust rather than better.
+
+`pattern` appears only when a repository has at least two negative outcomes in your journal.
+`declined` counts issues you chose not to start; `unlanded` counts work that was abandoned, closed
+unmerged, or stalled. `repeatedReason` is present only when a reason repeats, and quotes it verbatim in
+the most recently written phrasing. Nothing here contributes to `score` — judged issues are gated out
+of the shortlist entirely, so this describes the project rather than the candidate.
 
 **Notices**
 
@@ -182,7 +236,8 @@ curl 'http://127.0.0.1:8787/api/issues/acme/widgets/11/why'
   ],
   "repoSubtotal": 80,
   "issueSubtotal": 22,
-  "unmeasured": ["setup"]
+  "unmeasured": ["setup"],
+  "pattern": null
 }
 ```
 
@@ -191,6 +246,9 @@ always.
 
 `unmeasured` lists signals that could not contribute because the underlying data is missing. These are
 **absent, not zero** — an unmeasured project is not a bad one.
+
+`pattern` is the same structure as on a shortlist row, scoped to this issue's repository. It sits
+outside `repoSubtotal` and `issueSubtotal` by design, so the invariant above still holds.
 
 Works on issues the shortlist rejected, which is most of the reason to call it.
 
@@ -390,6 +448,154 @@ Poll `GET /api/sync` to watch it finish; `active.adding` names the project. A fa
 
 `404` if GitHub has no such public repository. `400` for a malformed reference. `409` if a scan is
 already running.
+
+### `POST /api/issues/:owner/:name/:number/claims`
+
+Is this issue actually free? Reads the comment thread and returns a dated verdict.
+
+**POST rather than GET**, because it spends a request against the GitHub rate limit and writes a row. A
+GET that a browser or a prefetcher could fire on its own would drain the budget answering questions
+nobody asked; this has to be something the person chose to do.
+
+**Query parameters**
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `cached` | flag | off | Return an earlier verdict without fetching |
+
+**Example**
+
+```json
+{
+  "issueId": 1010,
+  "repoFullName": "hog/monopoly",
+  "number": 101,
+  "title": "Monopoly candidate 1",
+  "htmlUrl": "https://github.com/hog/monopoly/issues/101",
+  "checkedAt": "2026-08-04T09:12:00.000Z",
+  "verdict": "contested",
+  "claimants": 7,
+  "claims": [
+    { "author": "ada", "at": "2026-08-01T…", "why": "asked to take it", "excerpt": "Can I work on this?" }
+  ],
+  "progress": [],
+  "linkedPrs": [],
+  "bountyHint": null,
+  "bountyLabels": [],
+  "commentsRead": 41,
+  "commentsTotal": 41,
+  "fromCache": false
+}
+```
+
+`verdict` in order of authority:
+
+| Verdict | Meaning | What to do |
+|---|---|---|
+| `in-progress` | Somebody reported actual work, or a pull request is linked | Skip it. A second pull request helps nobody |
+| `contested` | Several people asked and nobody was assigned | The evening-waster. Unless you want to race, go elsewhere |
+| `claimed` | One recent request, nobody assigned | Comment before you start |
+| `stale-claim` | A request went quiet for longer than an intention survives | Probably yours. Say so in the thread |
+| `free` | Nobody asked | Nothing suggests anyone else is on it |
+
+`commentsRead` and `commentsTotal` are both returned so coverage is visible: a verdict from 100 comments
+of a 412-comment thread is a weaker claim than one that read everything, and only the caller can decide
+what to say about the gap.
+
+Requires `GITHUB_TOKEN` — but only when the issue actually has comments. A thread with none is answered
+from the corpus without touching the network.
+
+404 when the issue is not in the corpus.
+
+### `GET /api/orgs`
+
+The organisation table: which organisations are worth your time, before the question of which issue.
+
+Every measured value is a rollup over the organisation's repositories, computed on read. Nothing is
+stored, so a rollup can never disagree with the metrics it summarises.
+
+**Query parameters** — all optional:
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `sort` | `attention` \| `candidates` \| `name` | `attention` | Ordering. An unknown value is refused |
+| `momentum` | `hype` \| `rising` \| `steady` \| `cooling` | any | The organisation's modal momentum verdict |
+| `gsoc` | four-digit year \| `any` | any | Only organisations tagged as GSoC participants. Refused if it is neither |
+| `language` | string | any | Modal primary language, matched case-insensitively |
+| `min-repos` | positive int | any | Drop organisations with fewer repositories in the corpus |
+| `uncovered` | flag | off | Only organisations with **no** repositories in the corpus |
+| `limit` | positive int | 50 | Rows per page |
+| `offset` | int ≥ 0 | 0 | Rows to skip |
+
+**Example**
+
+```json
+{
+  "summary": {
+    "organizations": 6,
+    "shown": 2,
+    "uncovered": 3,
+    "unmeasured": 0,
+    "openCandidates": 11
+  },
+  "rows": [
+    {
+      "login": "hog",
+      "displayName": null,
+      "repos": 1,
+      "measuredRepos": 1,
+      "responsiveness": "responsive",
+      "agreeing": 1,
+      "medianRepoHoursResponse": 9,
+      "mergeRate": 0.857,
+      "decidedPrs": 14,
+      "setup": { "light": 1, "moderate": 0, "heavy": 0, "unknown": 0 },
+      "claRepos": 0,
+      "dcoRepos": 1,
+      "stars": 2600,
+      "primaryLanguage": "TypeScript",
+      "openCandidates": 6,
+      "candidateRepos": 1,
+      "momentum": "hype",
+      "momentumRepos": 1,
+      "starsGained": 1400,
+      "gsocYears": [2026],
+      "tagsReviewedAt": "2026-08-04"
+    }
+  ],
+  "gsoc": {
+    "year": 2026,
+    "phase": "coding",
+    "daysUntil": 19,
+    "estimated": false,
+    "message": "GSoC 2026 coding is under way. …"
+  },
+  "notices": ["3 organisation(s) here have no repositories in your corpus. …"]
+}
+```
+
+**How each value is combined**, because none of these is an average of a score:
+
+| Field | Combination | Why |
+|---|---|---|
+| `responsiveness` | The **modal** verdict across measured repositories, ties broken toward the worse one | One dormant repo out of forty does not make an organisation dormant, and one responsive repo out of forty does not make it responsive. A tie resolves pessimistically because being told an organisation replies when half of it does not costs an evening |
+| `agreeing` / `measuredRepos` | The denominator behind that verdict | `2 of 4` is a different claim from `9 of 9`, and the reader gets to discount it |
+| `medianRepoHoursResponse` | Median of the **per-repository** medians | This is the typical *repository*, not the typical pull request. The field is named to keep that from being forgotten |
+| `mergeRate` / `decidedPrs` | **Pooled**: total merged over total decided | Not the mean of per-repo rates, which would let a repository with two decided PRs outvote one with two hundred. `100%` of 2 and `74%` of 300 must be distinguishable |
+| `setup` | A **distribution**, never an average | `light`/`moderate`/`heavy` are ordinals. Averaging them would invent a number, which is the one thing this tool does not do. It sums to fewer than `repos` when some have not been read |
+| `momentum` | The **modal** momentum verdict across repositories where velocity is measured, ties broken toward the worse one | `hype` is the expensive thing to be wrong about, as with responsiveness |
+| `starsGained` | Summed across repositories, and labelled as a sum | Adding growth is meaningful in a way adding verdicts would not be, but it is still scale rather than quality |
+| `gsocYears`, `tagsReviewedAt` | Curated, with the **oldest** review date of any tag | Curated is not measured. The oldest date is reported because the reader is about to trust every claim at once |
+
+`responsiveness: null` means nothing here has been measured. It is **not** the verdict `unknown`, which
+is a measured outcome meaning the evidence was too thin to call.
+
+`repos: 0` is a real row, not an empty one: an organisation from a curated list that has never been
+measured is the answer to "which of these have I never looked at". Drill in with
+`/api/shortlist?org=<login>`.
+
+`gsoc.estimated` is true whenever the driving date was inferred from 2026 rather than published. Only
+2026's timeline exists; every later year is a planning assumption.
 
 ### `GET /api/languages`
 

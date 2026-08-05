@@ -17,7 +17,7 @@ npm run migrate
 ```
 
 Safe to run repeatedly. Applied filenames are recorded in `schema_migrations`, so the runner skips what
-it has already done and prints `Up to date (8 migration(s) applied).`
+it has already done and prints `Up to date (13 migration(s) applied).`
 
 | File | What it added |
 |---|---|
@@ -95,6 +95,8 @@ One row per repository. The output of `sync metrics`, and the most valuable data
 | `responded_prs`, `median_hours_response`, `p90_hours_response` | Nullable — no sample means no median |
 | `no_response_rate` | The ignore rate |
 | `merged_prs`, `closed_unmerged_prs`, `open_prs`, `merge_rate` | Whether work actually lands |
+| `open_pr_total` | Every open pull request in the repository, exact. **Not the same as `open_prs`** |
+| `oldest_open_pr_at`, `oldest_open_pr_number` | The oldest open pull request. A queue of 200 that turns over weekly and a queue of 12 whose oldest has waited three years are different projects |
 | `too_recent_prs`, `decidable_prs` | A PR opened yesterday is not evidence of anything yet |
 | `confidence` | `none` \| `low` \| `medium` \| `high`. Low confidence halves the repo signals |
 | `responsiveness` | `dormant` \| `slow` \| `moderate` \| `responsive` \| `unknown` |
@@ -120,12 +122,124 @@ One row per repository. The output of `sync setup`.
 | `frameworks` | Detected frameworks, from dependencies plus matching topics. GIN-indexed. Empty means none detected, not none used |
 | `compose_depth`, `env_depth` | Path depth, 0 for root. **Non-zero rows are ones the old root-only reading missed entirely** |
 | `root_files_seen` | What the root-only reading would have counted, kept so the change is measurable |
+| `contributor_agreement` | `cla` \| `dco` \| `both` \| `none`, or **null for unmeasured**. See below |
+| `agreement_evidence` | The phrases and paths that produced the verdict |
+| `contributing_path` | Where CONTRIBUTING was found: root, `.github/` or `docs/` |
 | `setup_weight` | `light` \| `moderate` \| `heavy` \| `unknown` |
 | `signals` | The raw facts behind the verdict |
+
+`repo_stars_history` is read for the first time in Phase 3. Velocity is `stars now − stars at the oldest
+sample inside the window`, and the query aggregates to the **two endpoints plus a count** rather than
+fetching every row: a ninety-day window over a thousand repositories is tens of thousands of rows to use
+two of them per repository. The minimum span, the null semantics and the arithmetic stay in
+`src/velocity/compute.ts`, so both callers go through one implementation.
+
+> `open_prs` and `open_pr_total` are easy to confuse and mean different things. `open_prs` counts open
+> **external** pull requests inside the sampled responsiveness window and is the denominator for
+> `open_stale_rate` and therefore for the dormancy rule. `open_pr_total` is the size of the review queue:
+> every open pull request, any author, from a filtered `totalCount` rather than from the sample. The
+> collision was caught while adding the second one, which is why both now carry SQL comments.
 
 > Read from the **whole tree** since migration 008. Compose and env files are found at any depth;
 > root-level facts (Makefile, lockfiles) still come from the root deliberately. A truncated tree yields
 > `unknown` rather than a confident verdict.
+
+`contributor_agreement` is `none` **only when a CONTRIBUTING file was actually read** and mentioned
+neither a CLA nor a DCO. No readable CONTRIBUTING and no bot configuration means null, not `none` —
+having looked nowhere is not evidence of absence, and a confident "no CLA" that walks you into a
+signature wall is the failure the column exists to prevent. Positive findings survive a truncated
+tree; only the absence verdict is withheld. `has_contributing` is untouched and remains a root-only
+fact, so this addition did not re-score anything.
+
+### `repo_stars_history`
+
+One star count per repository per **UTC day**. Written by every path that learns a star count:
+`sync repos` (including 304s, where an unchanged ETag is itself the observation), `seed`, and `add`.
+
+| Column | Notes |
+|---|---|
+| `repo_id`, `observed_at` | Composite primary key. The key is what enforces one sample per repo per day |
+| `stars` | The count observed that day; a later reading on the same day replaces it |
+
+**Nothing reads this yet.** It exists because velocity needs samples weeks apart, so writing has to
+start long before reading — a table created on the day the feature is wanted is a table with one row
+in it. Migration 009 backdates a first sample from `repos.stars` at `meta_synced_at`, so an existing
+corpus starts with real dated history rather than from zero. Samples are never dated `now()` when the
+reading is older than that; a flat stretch of invented history would produce a velocity of zero, which
+is worse than no velocity.
+
+Day-bucketing rather than instants is deliberate: otherwise sync frequency masquerades as sampling
+quality, and someone syncing hourly would accumulate 24 rows a day for reasons unconnected to the
+projects being measured.
+
+### `organizations` and `org_tags`
+
+The object model the org layer needs. `organizations` is **identity only** — every measured fact about
+an organisation is a rollup over its repositories, computed on read so it cannot go stale behind the
+metrics it summarises.
+
+| `organizations` | Notes |
+|---|---|
+| `login` | Primary key, joined against `repos.owner` |
+| `display_name` | Null means not fetched. Phase 0 spends no API budget |
+| `first_seen_at` | Backfilled from `min(discovered_at)` of the org's repos, not from migration time |
+
+| `org_tags` | Notes |
+|---|---|
+| `org_login`, `kind`, `value` | Composite primary key. `kind` is `CHECK`-constrained and guarded against `ORG_TAG_KINDS` |
+| `source` | Where the claim came from. Null means unrecorded |
+| `reviewed_at` | **Not null.** No curated value can be added without saying when a human checked it |
+
+One row per claim rather than array columns on one row, which is how the roadmap first sketched it. A
+single `reviewed_at` cannot say when *each* value was checked, and "GSoC 2024, 2025, 2026" reviewed
+last February means something different from the same list reviewed today.
+
+Rows are never deleted when an organisation's last repository is pruned: losing a reviewed GSoC list
+because a repo went dormant would be a bad trade.
+
+### `profile`
+
+| Column | Notes |
+|---|---|
+| `weight_set` | Which named weight set to score against. Null is the default. `CHECK`-constrained and guarded against `WEIGHT_SETS` |
+
+Added in migration 013. **The roadmap claimed the profile already supported alternative weights; it did
+not** — it carried preference points capped at ±25, layered over a single module constant the scorer read
+directly in forty-five places. `career-leverage` mainly needs to *remove* a penalty, which preference
+points cannot do. See `src/rank/weight_sets.ts`.
+
+Named rather than free-form so an unrecognised value is a constraint violation at write time instead of a
+silent fallback at read time. A profile that quietly scores against different weights than it claims is
+the worst version of this feature.
+
+### `issue_claims`
+
+An **on-demand cache of a decaying observation**: whether an issue is actually free.
+
+| Column | Notes |
+|---|---|
+| `issue_id` | Primary key. One current verdict per issue |
+| `checked_at` | **Not null.** Every read shows the age; a verdict is true as of this moment and no longer |
+| `verdict` | `free` \| `claimed` \| `contested` \| `in-progress` \| `stale-claim`. `CHECK`-constrained and guarded against `CLAIM_VERDICTS` |
+| `claimants` | Distinct non-bot people who expressed intent |
+| `latest_claim_at`, `latest_claimant` | The most recent request |
+| `progress_at`, `progress_by` | Somebody reporting actual work, which is stronger than intent |
+| `linked_prs` | Pull requests referenced in the thread |
+| `bounty_hint` | A bounty mention found in comments. Labels are read separately and need no fetch |
+| `comments_read` / `comments_total` | Coverage. A verdict from 100 of 412 comments is a different claim |
+
+**No row means never checked, which is not the same as free.** The shortlist joins this table and shows
+`null` as absent rather than as available — presenting an unknown as free is precisely the error that
+makes someone spend an evening on work already in flight.
+
+Written only by an explicit check: `claims owner/name#123`, or the button in the UI. A corpus-wide
+comment sync would cost tens of thousands of requests to answer a question about the five issues anyone
+looks at, and the answer would be stale before it finished.
+
+Verdicts in order of authority: `in-progress` beats everything (somebody with work in flight settles
+it), `contested` beats `claimed` (several people asking with nobody assigned means the maintainers are
+not managing assignment at all), and `stale-claim` means a request went quiet for longer than an
+intention survives — about a fortnight — so the issue is probably available again.
 
 ### `decisions`
 
@@ -136,7 +250,7 @@ One row per judgement. Append-only.
 | `issue_id` | |
 | `verdict` | One of eight; `CHECK`-constrained |
 | `predicted_hours`, `actual_hours` | Nullable. Recorded at different times, which is why this is append-only |
-| `reason` | Free text |
+| `reason` | Free text. Also read by the rejection-pattern derivation |
 | `created_at` | |
 
 **Several rows per issue is normal and intended.** `started --hours 4` today and
@@ -145,6 +259,13 @@ prediction with the outcome. A per-row view could never do that, which is why th
 in SQL.
 
 Any decision removes the issue from future shortlists.
+
+`reason` is read a second time by `src/rank/patterns.ts`, which groups negative outcomes per
+repository — four rejections in one project for "needs design discussion first" is that project
+telling you something. It is shown beside a row and **never scored**: judged issues are already gated
+out, so the derivation describes the project rather than the candidate, and folding a handful of
+hand-written notes into the weights would mean the ranking learns from something nobody has
+validated.
 
 ### `sync_runs`
 

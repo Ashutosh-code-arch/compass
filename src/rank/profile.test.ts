@@ -41,6 +41,13 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
     taskRunner: 'make',
     hasContributing: true,
     ciRunsOnPr: true,
+    contributorAgreement: null,
+    updatedAtGh: null,
+    openPrTotal: null,
+    oldestOpenPrAt: null,
+    claimVerdict: null,
+    claimCheckedAt: null,
+    claimClaimants: null,
     ...overrides,
   };
 }

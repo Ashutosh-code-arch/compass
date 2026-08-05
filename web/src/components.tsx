@@ -1,4 +1,4 @@
-import type { ScoreLine, ShortlistNotice, RowContext } from './api.ts';
+import type { CurrentState, RepoPattern, ScoreLine, ShortlistNotice, RowContext } from './api.ts';
 
 /**
  * Nothing this tool measures is continuous, so nothing here is drawn as continuous.
@@ -163,6 +163,122 @@ export function EvidenceChip({ line }: { line: ScoreLine }) {
   );
 }
 
+/**
+ * Paperwork, shown only when there is some.
+ *
+ * A CLA and a DCO are not the same size of obstacle and are not drawn as though they were: a CLA is a
+ * signature, sometimes needing an employer, and for some people a hard stop; a DCO is one flag on a
+ * commit. `none` renders nothing at all — "no agreement required" is the normal case and does not
+ * deserve a badge competing with the measurements. `null` also renders nothing, because the honest
+ * statement would be "we could not tell", and a row is the wrong place to say that; the breakdown
+ * says it instead.
+ */
+export function AgreementNote({ value }: { value: string | null }) {
+  if (value === null || value === 'none') return null;
+  const label =
+    value === 'both'
+      ? 'CLA + DCO'
+      : value === 'cla'
+        ? 'CLA required'
+        : 'DCO sign-off';
+  return (
+    <span
+      className={`chip chip--${value === 'dco' ? 'credit' : 'debit'}`}
+      title={
+        value === 'dco'
+          ? 'Commits need a Signed-off-by line. One flag on each commit, no signature.'
+          : 'This project mentions a Contributor License Agreement. Worth resolving before you write the code.'
+      }
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * The decaying facts, and the one thing they must never do: imply that an unchecked issue is free.
+ *
+ * A verdict is always shown with its age, because "free, checked 3 weeks ago" is nearly worthless and
+ * "free, checked today" is the reason to start work. Nothing here is scored, so none of it is drawn as
+ * an evidence chip — those carry point values and these do not.
+ */
+export function CurrentStateLine({ current }: { current: CurrentState }) {
+  const parts: React.ReactNode[] = [];
+
+  if (current.claimVerdict !== null) {
+    const age =
+      current.claimAgeDays === null
+        ? ''
+        : current.claimAgeDays === 0
+          ? ' · checked today'
+          : ` · checked ${current.claimAgeDays}d ago`;
+    const taken = current.claimVerdict === 'contested' || current.claimVerdict === 'in-progress';
+    parts.push(
+      <span
+        key="claim"
+        className={`chip ${taken ? 'chip--debit' : ''}`}
+        title={
+          taken
+            ? 'Somebody else is already on this, or a queue of people is waiting to be assigned'
+            : 'As of the check. A claim can appear at any time after it'
+        }
+      >
+        {current.claimVerdict}
+        {current.claimVerdict === 'contested' && current.claimants !== null
+          ? ` · ${current.claimants} asked`
+          : ''}
+        {age}
+      </span>,
+    );
+  }
+
+  /**
+   * Momentum first, because a `hype` verdict is the one fact here that should change your mind before
+   * you read anything else. Drawn as a debit only when it is actually a warning: `rising` is the best
+   * thing this row can say about a project.
+   */
+  if (current.momentumDetail !== null) {
+    const warning = current.momentum === 'hype';
+    parts.push(
+      <span
+        key="momentum"
+        className={`chip ${warning ? 'chip--debit' : current.momentum === 'rising' ? 'chip--credit' : ''}`}
+        title={
+          warning
+            ? 'Growing fast, and the measurements say nobody can review the result. Every star-ranked list puts this at the top.'
+            : 'Growth measured from your own star history'
+        }
+      >
+        {current.momentumDetail}
+      </span>,
+    );
+  }
+
+  if (current.quietDays !== null && current.quietDays >= 30) {
+    parts.push(<span key="quiet">quiet {current.quietDays}d</span>);
+  }
+
+  if (current.openPrTotal !== null && current.openPrTotal >= 20) {
+    parts.push(
+      <span key="queue" title="Every open pull request in the repository">
+        {current.openPrTotal} open PRs
+        {current.oldestOpenPrDays === null ? '' : `, oldest ${current.oldestOpenPrDays}d`}
+      </span>,
+    );
+  }
+
+  if (current.bounty.length > 0) {
+    parts.push(
+      <span key="bounty" className="chip">
+        {current.bounty.join(', ')}
+      </span>,
+    );
+  }
+
+  if (parts.length === 0) return null;
+  return <div className="row__context">{parts}</div>;
+}
+
 export function RowContextLine({ context }: { context: RowContext }) {
   return (
     <div className="row__context">
@@ -178,7 +294,38 @@ export function RowContextLine({ context }: { context: RowContext }) {
       <SetupMeter value={context.setupWeight} />
       {context.primaryLanguage && <span>{context.primaryLanguage}</span>}
       <span>{context.stars.toLocaleString()}★</span>
+      <AgreementNote value={context.contributorAgreement} />
     </div>
+  );
+}
+
+/**
+ * Your own history with a project, in your own words.
+ *
+ * Deliberately not styled as evidence and deliberately not given a point value. The ranking does not
+ * read this, and a chip with a number in it would suggest otherwise. Worded as a report of what you
+ * did rather than as a recommendation, because nothing here has been validated as predictive — six
+ * past rejections are a fact about you, not a forecast about the seventh issue.
+ */
+export function PatternNote({ pattern }: { pattern: RepoPattern }) {
+  const parts: string[] = [];
+  if (pattern.declined > 0) {
+    parts.push(`declined ${pattern.declined} ${pattern.declined === 1 ? 'issue' : 'issues'} here`);
+  }
+  if (pattern.unlanded > 0) {
+    parts.push(`${pattern.unlanded} never landed`);
+  }
+
+  return (
+    <p className="row__held">
+      Your journal: {parts.join(', ')}
+      {pattern.repeatedReason && (
+        <>
+          {' — '}
+          {pattern.repeatedReason.count}× “{pattern.repeatedReason.reason}”
+        </>
+      )}
+    </p>
   );
 }
 

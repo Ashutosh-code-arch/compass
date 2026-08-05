@@ -344,6 +344,17 @@ export interface CorpusSummary {
   /** Active repos whose metadata has not been refreshed in the last day. */
   staleMetadata: number;
   decisions: number;
+  /**
+   * Star observations recorded so far, and the days between the oldest and now.
+   *
+   * Nothing reads them yet. They are shown because a table filling up invisibly is a table somebody
+   * later decides to add again, and because the span is the only honest answer to "when will velocity
+   * mean anything".
+   */
+  starSamples: number;
+  /** Null when there is no history at all. Never 0, which would read as "no time has passed". */
+  starSpanDays: number | null;
+  organizations: number;
 }
 
 /**
@@ -366,7 +377,12 @@ export async function corpusSummary(): Promise<CorpusSummary> {
                 where sync_state = 'active'
                   and (meta_synced_at is null
                        or meta_synced_at < now() - interval '24 hours'))        as stale_metadata,
-              (select count(*) from decisions)                                      as decisions`,
+              (select count(*) from decisions)                                      as decisions,
+              (select count(*) from repo_stars_history)                              as star_samples,
+              -- Null when there is no history at all, which is not the same as a zero-day span.
+              (select (extract(epoch from (now() - min(observed_at))) / 86400)::int
+                 from repo_stars_history)                                             as star_span_days,
+              (select count(*) from organizations)                                    as organizations`,
     )
   ).rows[0]!;
 
@@ -380,5 +396,8 @@ export async function corpusSummary(): Promise<CorpusSummary> {
     reposWithSetup: n('repos_with_setup'),
     staleMetadata: n('stale_metadata'),
     decisions: n('decisions'),
+    starSamples: n('star_samples'),
+    starSpanDays: row['star_span_days'] === null ? null : n('star_span_days'),
+    organizations: n('organizations'),
   };
 }

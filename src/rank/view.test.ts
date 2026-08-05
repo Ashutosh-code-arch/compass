@@ -48,6 +48,13 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
     taskRunner: 'make',
     hasContributing: true,
     ciRunsOnPr: true,
+    contributorAgreement: null,
+    updatedAtGh: null,
+    openPrTotal: null,
+    oldestOpenPrAt: null,
+    claimVerdict: null,
+    claimCheckedAt: null,
+    claimClaimants: null,
     ...overrides,
   };
 }
@@ -403,4 +410,85 @@ test('an empty journal reports nothing rather than dividing by zero', () => {
   assert.deepEqual(view.entries, []);
   assert.equal(view.complete, 0);
   assert.equal(view.meanRatio, null);
+});
+
+// ---------------------------------------------------------- current state
+
+test('current state ages are computed from the clock that is passed in', () => {
+  const view = assembleShortlist(
+    [
+      candidate({
+        updatedAtGh: new Date(NOW.getTime() - 45 * 86_400_000).toISOString(),
+        openPrTotal: 214,
+        oldestOpenPrAt: new Date(NOW.getTime() - 800 * 86_400_000).toISOString(),
+        claimVerdict: 'contested',
+        claimCheckedAt: new Date(NOW.getTime() - 2 * 86_400_000).toISOString(),
+        claimClaimants: 7,
+      }),
+    ],
+    { minScore: 0, now: NOW },
+  );
+
+  const current = view.rows[0]!.context.current;
+  assert.equal(current.quietDays, 45);
+  assert.equal(current.openPrTotal, 214);
+  assert.equal(current.oldestOpenPrDays, 800);
+  assert.equal(current.claimVerdict, 'contested');
+  assert.equal(current.claimAgeDays, 2);
+  assert.equal(current.claimants, 7);
+});
+
+/**
+ * The distinction the whole feature rests on. An unchecked issue is unknown, not free — and rendering
+ * it as free is what makes someone spend an evening on work already in flight.
+ */
+test('an unchecked issue has a null verdict, never free', () => {
+  const view = assembleShortlist([candidate()], { minScore: 0, now: NOW });
+  const current = view.rows[0]!.context.current;
+  assert.equal(current.claimVerdict, null);
+  assert.equal(current.claimAgeDays, null);
+});
+
+test('missing timestamps stay null rather than becoming zero ages', () => {
+  const view = assembleShortlist(
+    [candidate({ updatedAtGh: null, oldestOpenPrAt: null, openPrTotal: null })],
+    { minScore: 0, now: NOW },
+  );
+  const current = view.rows[0]!.context.current;
+  // Zero days quiet would read as "active today", which is the opposite of "we do not know".
+  assert.equal(current.quietDays, null);
+  assert.equal(current.oldestOpenPrDays, null);
+  assert.equal(current.openPrTotal, null);
+});
+
+test('bounty labels are surfaced from labels already in the corpus', () => {
+  const view = assembleShortlist(
+    [candidate({ labels: ['good first issue', 'bounty', '$150'] })],
+    { minScore: 0, now: NOW },
+  );
+  assert.deepEqual(view.rows[0]!.context.current.bounty, ['bounty', '$150']);
+});
+
+/**
+ * Phase 2 adds five current-state fields and no weights, deliberately. A claim verdict exists only for
+ * issues somebody checked, so scoring it would order two identical issues differently according to how
+ * requests had been spent — and no weight in weights.ts has been validated against an outcome yet, so
+ * adding six more unvalidated numbers would make the ranking harder to trust rather than better.
+ */
+test('current state does not change the score', () => {
+  const plain = assembleShortlist([candidate()], { minScore: 0, now: NOW });
+  const loaded = assembleShortlist(
+    [
+      candidate({
+        claimVerdict: 'contested',
+        claimCheckedAt: NOW.toISOString(),
+        claimClaimants: 12,
+        openPrTotal: 900,
+        oldestOpenPrAt: new Date(NOW.getTime() - 1000 * 86_400_000).toISOString(),
+        labels: ['good first issue', 'bounty'],
+      }),
+    ],
+    { minScore: 0, now: NOW },
+  );
+  assert.equal(loaded.rows[0]!.score, plain.rows[0]!.score);
 });

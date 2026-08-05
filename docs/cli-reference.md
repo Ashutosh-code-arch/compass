@@ -172,8 +172,8 @@ Uses GraphQL, so it is efficient per repository but the queries are large.
 
 ### `sync setup`
 
-Reads each repository's root files — compose files, env templates, task runners, CI config — and
-derives a `light` / `moderate` / `heavy` verdict.
+Reads each repository's files — compose files, env templates, task runners, CI config, CONTRIBUTING —
+and derives a `light` / `moderate` / `heavy` verdict, plus any CLA or DCO requirement.
 
 ```bash
 npm run compass -- sync setup --limit 100
@@ -187,8 +187,15 @@ npm run compass -- sync setup --stale-days 0
 | `--repo owner/name` | — | One repository |
 | `--batch-size N` | 3 | Repositories per request. Kept low because this returns file contents |
 
-> Reads **root-level files only**. A project keeping its compose file in a subdirectory will read as
-> simpler than it is. See [Roadmap](roadmap.md).
+> Reads the **whole file tree** since migration 008, so a project keeping its compose file in
+> `build/` or its env template in `config/` no longer reads as simpler than it is. Root-level facts
+> (Makefile, lockfiles) still come from the root deliberately, so the change did not re-score the
+> corpus for unrelated reasons. A tree GitHub truncated yields `unknown`, never a confident verdict.
+>
+> Also reports a **CLA or DCO** requirement, found in CONTRIBUTING (root, `.github/` or `docs/`) and
+> in CLA/DCO bot configuration. `none` is only reported when a CONTRIBUTING file was actually read —
+> otherwise the answer is unmeasured, because a confident "no CLA" that walks you into a signature
+> wall is worse than no answer.
 
 ### `sync all`
 
@@ -204,6 +211,168 @@ long each takes on your corpus.
 ---
 
 ## Finding work
+
+### `orgs`
+
+The organisation table: **which organisations are worth your time**, asked before which issue.
+
+Every competitor lists issues carrying a label. None of them measures whether maintainers merge work
+from outsiders — which is what the three middle columns here are, and the only reason this table can
+exist.
+
+```bash
+npm run compass -- orgs
+npm run compass -- orgs --gsoc 2026                  # only GSoC participants
+npm run compass -- orgs --gsoc 2026 --uncovered      # …that you have never measured
+npm run compass -- orgs --sort candidates --limit 20
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--sort attention\|candidates\|name` | `attention` | Ordering. An unknown value is refused, not ignored |
+| `--gsoc YEAR\|any` | any | Only organisations tagged as GSoC participants. A four-digit year or `any` |
+| `--language X` | any | Modal primary language, matched case-insensitively |
+| `--min-repos N` | any | Drop organisations with fewer repositories in the corpus |
+| `--momentum hype\|rising\|steady\|cooling` | any | The organisation's modal momentum verdict |
+| `--uncovered` | off | Only organisations with **no** repositories in the corpus |
+| `--limit N` | 50 | Rows to show |
+| `--offset N` | 0 | Rows to skip |
+
+```
+Organisation              Maintainers reply?          Merge rate       Setup                 Open    GSoC
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+hog                       responsive · 9h             86% of 14        1 light               6       2026
+acme                      slow 1/2 · 34h              76% of 37        1 light 1 mod         5       2026
+                          CLA in 1 of 2 repos — resolve before writing code
+cern-hsf                  not in corpus               —                —                     0       2026
+```
+
+**Nothing here is a score.** The ordering is an ordinal cascade — verdict, then merge rate, then how
+much work is actually available, then name — so any position can be explained by pointing at a column.
+A composite number would be a fifth invented measurement and would hide the tradeoff you are here to
+make.
+
+Read the columns as follows:
+
+- **The verdict is modal** across an organisation's *measured* repositories, with the count shown
+  (`slow 1/2`). Ties break toward the worse verdict: being told an organisation replies when half of it
+  does not costs an evening, while the reverse costs a second look.
+- **Median reply is a median of per-repository medians.** It describes the typical repository, not the
+  typical pull request.
+- **Merge rate is pooled, not averaged,** and always carries its denominator. `100% of 2` and
+  `76% of 37` are not the same claim.
+- **Setup is a distribution.** These are ordinals; averaging them would invent a number. It sums to
+  fewer than the repository count when some have not been read.
+- **`not in corpus`** is a real row. It means the organisation came from a curated list and nothing
+  about it has been measured — which is exactly the list to run [`add`](#add) against.
+
+**Momentum** is growth crossed with the ability to absorb it, and the column that makes this table worth
+more than a star ranking:
+
+| Verdict | Meaning | What it means for you |
+|---|---|---|
+| `hype` | Surging, and the measurements say nobody can review the result | The worst place to spend five hours, and the one every star-ranked list puts at the top |
+| `rising` | Surging, and maintainers are demonstrably reading outside work | The best place to be early: visible project, active mentors, and your pull request lands |
+| `steady` | Growing normally | Most good projects, most of the time |
+| `cooling` | Losing stars, or gaining none across the window |  |
+| `—` | **Unmeasured**, never "not growing" | Needs two star samples a week or more apart |
+
+`hype` is never reached from growth alone. "This project is popular" is not a criticism, and a verdict
+amounting to one would be the tool substituting taste for measurement — so it also requires a measured
+capacity concern: dormant or slow replies, a queue of 100+ open pull requests, or a merge rate at or below
+40% over at least ten decided pull requests.
+
+Dormant organisations are shown by default, unlike the shortlist, which excludes dormant repositories
+outright. That is deliberate: "this GSoC organisation has 40 open issues and has not replied to an
+outsider in 31 days" is the most valuable row this table can produce.
+
+Drill in with `shortlist --org <login>`.
+
+### `gsoc import`
+
+Tags organisations as GSoC participants for a year, from a hand-checked file.
+
+```bash
+npm run compass -- gsoc import gsoc-2026.txt --year 2026 --source "official list, read 2026-08-04"
+npm run compass -- gsoc import gsoc-2026.txt --year 2026 --source "…" --replace
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--year N` | — | **Required.** The programme year |
+| `--source "…"` | — | **Required.** Where the list came from |
+| `--replace` | off | Delete that year's existing tags first, after the file validates |
+
+The file is one **GitHub login** per line. `#` starts a comment, blank lines are ignored, `owner/name`
+reduces to `owner`, and duplicates collapse.
+
+```
+# GSoC 2026, mapped by hand from the official list
+python          # Python Software Foundation
+cern-hsf
+postgres/postgres
+```
+
+**Why a file and not a fetch.** The published list carries *programme* names — "Python Software
+Foundation", "CERN-HSF" — which are not GitHub logins. Something has to map one to the other, and no
+scraper does that reliably. A human doing it once a year is what the `curated` provenance class means.
+
+**`--source` is required, not defaulted.** A curated value with no provenance is indistinguishable from
+a measurement, and it is the kind that goes stale without anyone noticing. `reviewed_at` is stamped
+with today automatically and cannot be omitted.
+
+**Two things are refused rather than imported:**
+
+- **An empty file.** A changed page, a failed download, or a wrong path all produce one, and accepting
+  it would record "no organisation participates in GSoC" — a false finding, which is worse than a gap.
+  This is the same rule as `null` never meaning `0`.
+- **A file where more lines fail to parse than succeed.** An HTML dump or a list of programme names
+  would otherwise import the handful of lines that happened to look like logins, producing a plausible,
+  dated, wrong claim.
+
+Organisations not already in the corpus are **created** as identity-only rows rather than skipped, and
+the command reports how many. That count is the point of the import:
+
+```
+GSoC 2026: 5 organisation(s) tagged.
+3 organisation(s) were new to the corpus and now exist as rows.
+
+3 of them have no repositories in your corpus, so nothing about them is measured yet.
+```
+### `ross import`
+
+Ingests a ROSS Index dataset: which organisations are growing fastest, and who funds them.
+
+```bash
+npm run compass -- ross import ross-2026q1.csv --quarter 2026Q1 --source "RunaCapital/ROSS-Index, read 2026-08-04"
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--quarter Q` | — | **Required.** The dataset's quarter, e.g. `2026Q1` |
+| `--source "…"` | — | **Required.** Where the dataset came from |
+
+Runa Capital publishes the index as datasets in a git repository (`RunaCapital/ROSS-Index`), already
+joined: organisation, `owner/repo`, stars, growth multiple, founding year, location, and funding including
+YC. No scraping, no terms-of-service question, no brittle selectors. See
+[`fixtures/ross-index.example.csv`](../fixtures/ross-index.example.csv) for the shape.
+
+**Columns are matched by name, not by position.** A positional parser would read growth multiples as star
+counts the first time somebody inserted a column, and nothing in the output would look wrong. The command
+prints which column it read for each field so a surprising import can be explained rather than re-guessed.
+
+**Growth is deliberately not imported.** Compass measures that itself from `repo_stars_history`, and
+storing somebody else's growth figure beside its own would create two numbers for one question with no way
+to tell which you were looking at. What the import contributes is the two things the corpus cannot derive:
+**funding**, and **who is on the list at all** — a discovery feed rather than a signal.
+
+Everything written is **curated**: somebody else's numbers, on their date, stored with a `reviewed_at`
+saying so. Refusals match [`gsoc import`](#gsoc-import) — an empty dataset, a file with no recognisable
+owner column, or one where more rows fail than parse.
+
+Repositories named by the dataset that are absent from the corpus are reported as `add` commands. Until
+they are added, nothing about them is measured.
+
 
 ### `shortlist`
 
@@ -229,6 +398,10 @@ npm run compass -- shortlist --per-repo 5 --limit 40
 | `--min-stars N` | any | Star floor |
 | `--max-stars N` | any | Star ceiling |
 | `--include-dormant` | off | Include projects where nobody answers outside PRs |
+| `--org login` | any | One organisation. The drill-down from [`orgs`](#orgs) |
+| `--exclude-claimed` | off | Drop issues a [claim check](#claims) found taken. Unchecked issues stay in |
+| `--momentum hype\|rising\|steady\|cooling` | any | Growth crossed with review capacity. **Excludes repositories whose velocity is unmeasured** |
+| `--weights career-leverage` | default | Score against a named weight set for this run only, without changing the saved profile |
 
 **`--stack` matches evidence, not names.** It reads declared dependencies (`package.json`,
 `pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `pom.xml`) plus GitHub topics. A repository
@@ -279,6 +452,55 @@ synced.
 
 This is the part that turns the tool from a guess into a measurement. Skipping it is why the weights
 are still unvalidated.
+### `claims`
+
+Is this issue **actually free**? Reads the comment thread and gives a dated verdict.
+
+```bash
+npm run compass -- claims acme/widgets#412
+npm run compass -- claims acme/widgets#412 --cached    # reuse an earlier check
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--cached` | off | Return an earlier verdict instead of fetching |
+
+The problem it solves: a `good first issue` with 23 comments is usually twenty people asking "can I work
+on this?" and one person three days in without an assignment. GitHub's assignee field is empty in every
+one of those cases, so the shortlist — which correctly excludes *assigned* issues — treats the whole pile
+as free work. It is the largest remaining way this tool can waste an evening.
+
+| Verdict | Meaning | What to do |
+|---|---|---|
+| `in-progress` | Somebody reported actual work, or a pull request is linked | Skip it. A second pull request helps nobody |
+| `contested` | Several people asked and nobody was assigned | The evening-waster. Unless you want to race, go elsewhere |
+| `claimed` | One recent request, nobody assigned | Comment before you start |
+| `stale-claim` | A request went quiet for longer than an intention survives, about a fortnight | Probably yours. Say so in the thread |
+| `free` | Nobody asked | Nothing in the thread suggests anyone else is on it |
+
+**A verdict is true as of the moment it was made**, and is always printed with its age and its coverage.
+`free` from three weeks ago, read from 100 comments of a 412-comment thread, is a much weaker claim than
+a fresh check that read everything — and only the age tells you which you have.
+
+**Costs one request**, and only when the issue has comments; a thread with none is answered from the
+corpus without touching the network. Results are cached, so a later `shortlist` shows what you already
+know for nothing, and `--exclude-claimed` can act on it.
+
+**What is deliberately not a claim.** Each of these appears constantly in issue threads and each would
+match otherwise:
+
+- *"Is anyone working on this?"* — a question about other people's claims
+- *"@ada can you take this one?"* — delegation, usually from a maintainer
+- *"Are you still working on this?"* — a maintainer chasing a stale claim
+- *"I'll take a look"* — looking is not doing
+- *"You can use /assign me to claim issues here"* — instructions, not intent
+
+A claim must be first-person and volitional. *"I would like to work on this if nobody else is"* **is** a
+claim, deliberately: that person is volunteering, and treating it as a question would produce a false
+`free`, which is the expensive direction to be wrong in.
+
+Nothing here changes the score. See [How ranking works](how-ranking-works.md).
+
 
 ### `decide`
 

@@ -20,7 +20,8 @@
     "web:install": "npm --prefix web install",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
-    "start": "npm run web:build && npm run serve"
+    "start": "npm run web:build && npm run serve",
+    "render:check": "node scripts/render-check.mjs"
   },
   "dependencies": {
     "@fastify/static": "^10.1.2",
@@ -33,6 +34,7 @@
     "@types/pg": "^8.11.10",
     "graphql": "^17.0.2",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "jsdom": "^26.1.0"
   }
 }

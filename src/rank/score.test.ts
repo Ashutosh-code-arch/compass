@@ -44,6 +44,13 @@ function candidate(overrides: Partial<Candidate> = {}): Candidate {
     taskRunner: null,
     hasContributing: null,
     ciRunsOnPr: null,
+    contributorAgreement: null,
+    updatedAtGh: null,
+    openPrTotal: null,
+    oldestOpenPrAt: null,
+    claimVerdict: null,
+    claimCheckedAt: null,
+    claimClaimants: null,
     ...overrides,
   };
 }

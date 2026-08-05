@@ -2,12 +2,15 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Filters, type ShortlistRow } from './api.ts';
 import {
+  CurrentStateLine,
   EvidenceChip,
   Ledger,
   Notice,
+  PatternNote,
   ProvenanceBar,
   RowContextLine,
 } from './components.tsx';
+import { ClaimCheckButton } from './ClaimCheck.tsx';
 import { DecideDialog } from './DecideDialog.tsx';
 
 const DEFAULT_FILTERS: Filters = { limit: 20, perRepo: 2 };
@@ -21,8 +24,16 @@ const DEFAULT_FILTERS: Filters = { limit: 20, perRepo: 2 };
  */
 type FilterPatch = { [K in keyof Filters]?: Filters[K] | undefined };
 
-export function Shortlist() {
-  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
+/**
+ * `initialOrg` is the drill-down from the organisations table.
+ *
+ * Seeded into state rather than held as a prop, because the filter rail must be able to clear it —
+ * arriving from an organisation should not trap you inside it.
+ */
+export function Shortlist({ initialOrg }: { initialOrg?: string } = {}) {
+  const [filters, setFilters] = useState<Filters>(
+    initialOrg === undefined ? DEFAULT_FILTERS : { ...DEFAULT_FILTERS, org: initialOrg },
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<ShortlistRow | null>(null);
 
@@ -227,6 +238,10 @@ function Row({
 
           <RowContextLine context={row.context} />
 
+          <CurrentStateLine current={row.context.current} />
+
+          {row.pattern && <PatternNote pattern={row.pattern} />}
+
           {row.heldBackInRepo > 0 && (
             <p className="row__held">
               +{row.heldBackInRepo} more scoring {row.heldBackInRepo === 1 ? 'issue' : 'issues'} in
@@ -254,6 +269,8 @@ function Row({
         <button type="button" className="btn" onClick={onToggle}>
           {open ? 'Hide the full breakdown' : 'Show the full breakdown'}
         </button>
+        {/* Costs a GitHub request, so it stays a deliberate action rather than firing on expand. */}
+        <ClaimCheckButton repoFullName={row.issue.repoFullName} number={row.issue.number} />
       </div>
     </li>
   );
@@ -307,6 +324,19 @@ function WhyPanel({ repoFullName, number }: { repoFullName: string; number: numb
         <p className="unmeasured-note">
           Not measured, and contributing nothing either way: {why.unmeasured.join(', ')}. These are
           absent, not zero — an unmeasured project is not a bad one.
+        </p>
+      )}
+
+      {why.pattern && (
+        <p className="unmeasured-note">
+          Your journal on this project: {why.pattern.declined > 0 &&
+            `${why.pattern.declined} declined`}
+          {why.pattern.declined > 0 && why.pattern.unlanded > 0 && ', '}
+          {why.pattern.unlanded > 0 && `${why.pattern.unlanded} never landed`}
+          {why.pattern.repeatedReason &&
+            ` — ${why.pattern.repeatedReason.count}× “${why.pattern.repeatedReason.reason}”`}
+          . Not part of the arithmetic above: these are your notes, shown beside the score rather than
+          folded into it.
         </p>
       )}
 
@@ -489,6 +519,15 @@ function FilterRail({
             onChange={(event) => patch({ includeDormant: event.target.checked })}
           />
           Include dormant projects
+        </label>
+
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={filters.excludeClaimed ?? false}
+            onChange={(event) => patch({ excludeClaimed: event.target.checked })}
+          />
+          Hide issues found taken
         </label>
       </div>
 

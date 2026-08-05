@@ -4,10 +4,12 @@ import { GitHubGraphQL } from '../github/graphql.ts';
 import { mapLimit } from '../github/rest.ts';
 import { computeMetrics, type RepoMetrics } from '../metrics/compute.ts';
 import {
+  type GqlRepository,
+  type QueueDepth,
   buildMaintainerRoster,
   buildMetricsQuery,
   mapPullRequest,
-  type GqlRepository,
+  mapQueueDepth,
 } from './metrics_query.ts';
 import { withSyncRun, type RunSummary } from './run.ts';
 
@@ -174,7 +176,7 @@ export async function syncMetrics(options: SyncMetricsOptions = {}): Promise<Run
           graceDays,
         });
 
-        await storeMetrics(target.id, metrics, roster.size);
+        await storeMetrics(target.id, metrics, roster.size, mapQueueDepth(repository));
         computed += 1;
         ctx.reposSeen += 1;
         distribution[metrics.responsiveness] = (distribution[metrics.responsiveness] ?? 0) + 1;
@@ -231,12 +233,17 @@ const METRIC_COLUMNS = [
   'confidence',
   'responsiveness',
   'detail',
+  // Added in 012. Queue depth, which is a property of the repository rather than of the sample.
+  'open_pr_total',
+  'oldest_open_pr_at',
+  'oldest_open_pr_number',
 ];
 
 async function storeMetrics(
   repoId: number,
   metrics: RepoMetrics,
   rosterSize: number,
+  queue: QueueDepth,
 ): Promise<void> {
   const values = [
     repoId,
@@ -267,6 +274,9 @@ async function storeMetrics(
     metrics.confidence,
     metrics.responsiveness,
     jsonb({ perPr: metrics.perPr, maintainersKnown: rosterSize }),
+    queue.openPrs,
+    queue.oldestOpenPrAt,
+    queue.oldestOpenPrNumber,
   ];
 
   const placeholders = values.map((_unused, index) => `$${index + 1}`).join(', ');

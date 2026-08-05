@@ -1,4 +1,5 @@
 import { db } from './db.ts';
+import { starHistoryCoverage } from './sync/stars.ts';
 
 interface CorpusRow {
   repos: number;
@@ -115,12 +116,46 @@ export async function status(): Promise<void> {
     const total = setup.reduce((sum, row) => sum + row.n, 0);
     console.log(`\nSetup facts\n  computed for      ${total} repos`);
     for (const row of setup) console.log(`  ${row.setup_weight.padEnd(16)} ${row.n}`);
+
+    const agreements = (
+      await pool.query<{ contributor_agreement: string | null; n: number }>(
+        `select contributor_agreement, count(*)::int as n
+           from setup_facts group by 1 order by n desc`,
+      )
+    ).rows;
+    const measured = agreements.filter((row) => row.contributor_agreement !== null);
+    if (measured.length > 0) {
+      console.log('  contributor agreement');
+      for (const row of measured) {
+        console.log(`    ${(row.contributor_agreement ?? '').padEnd(14)} ${row.n}`);
+      }
+      const unmeasured = agreements.find((row) => row.contributor_agreement === null)?.n ?? 0;
+      if (unmeasured > 0) {
+        console.log(`    ${'unmeasured'.padEnd(14)} ${unmeasured} (no CONTRIBUTING file was readable)`);
+      }
+    }
     const truncated = (
       await pool.query<{ n: number }>('select count(*)::int as n from setup_facts where tree_truncated')
     ).rows[0];
     if (truncated && truncated.n > 0) {
       console.log(`  tree unread       ${truncated.n} (absence of a file proves nothing for these)`);
     }
+  }
+
+  /**
+   * Star history exists so that velocity can exist later, and nothing reads it yet — which makes it
+   * exactly the kind of work that gets rebuilt because nobody could tell it had happened. This line
+   * is how you know the clock is running.
+   */
+  const stars = await starHistoryCoverage();
+  if (stars.samples > 0) {
+    console.log('\nStar history');
+    console.log(`  samples           ${stars.samples} across ${stars.repos} repos`);
+    console.log(
+      stars.spanDays !== null && stars.spanDays >= 1
+        ? `  spanning          ${stars.spanDays} days — velocity becomes measurable as this grows`
+        : `  spanning          under a day — velocity needs samples weeks apart`,
+    );
   }
 
   /**

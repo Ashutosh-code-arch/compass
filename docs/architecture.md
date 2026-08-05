@@ -17,6 +17,7 @@ src/
   params.ts           PURE string→value coercion, shared by the CLI and the HTTP query parser
   db.ts               one pg Pool, lazily created
   migrate.ts          the migration runner
+  schema_constraints.ts  reads CHECK values out of the migrations, for the drift guards
 
   github/
     rest.ts           REST client: ETags, retries, rate-limit budget
@@ -34,18 +35,44 @@ src/
     metrics_query.ts  PURE GraphQL query building and response mapping
     setup.ts          setup complexity
     setup_query.ts    PURE file parsing → setup facts
+    tree.ts           PURE path classification; the whole-tree walk
+    stars.ts          star observations, one per repo per UTC day. PURE day bucketing
+    orgs.ts           keeps `organizations` in step with the corpus. One statement
 
   metrics/compute.ts  PURE statistics: medians, censoring, confidence
   setup/parse.ts      PURE file content → structured facts
+  setup/agreement.ts  PURE CLA/DCO detection from CONTRIBUTING text and tree paths
 
   rank/
     weights.ts        EVERY tunable number, with rationale
     profile.ts        PURE preference shape, validation, default resolution
     score.ts          PURE scoring → itemised breakdown
     candidates.ts     the SQL gates
+    weight_sets.ts    PURE. Named weight sets over WEIGHTS. Opt-in, never the default
     view.ts           PURE presentation models: per-repo cap, pagination, summaries
+    patterns.ts       PURE derivation of per-repo patterns from your own journal
     data.ts           queries → view models. No formatting
     render.ts         terminal output. Every value arrives already computed
+
+  velocity/
+    compute.ts        PURE. Star velocity, and growth crossed with review capacity
+    data.ts           endpoint aggregation per repository. No judgement
+    index.ts          the pure surface, so PURE modules never import data.ts
+    types.ts          RepoMomentum, declared apart from the query layer
+
+  claims/
+    detect.ts         PURE. Comment thread -> claim verdict. All the phrasing rules live here
+    check.ts          on-demand fetch of one thread, and the dated cache
+    render.ts         terminal output for a check
+
+  org/
+    view.ts           PURE rollup: modal verdict, pooled merge rate, distributions, the GSoC calendar
+    gsoc.ts           PURE parsing of a curated organisation list, and its refusals
+    ross.ts           PURE parsing of a ROSS Index dataset. Columns by name, never by position
+    ross_import.ts    writes ross_quarter and funding tags, with reviewed_at and source
+    data.ts           queries -> view models. No formatting
+    import.ts         writes gsoc_year tags, with reviewed_at and source
+    render.ts         terminal output: the organisation table
 
   http/
     server.ts         Fastify: query parsing and status-code mapping only

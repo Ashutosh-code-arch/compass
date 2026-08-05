@@ -2,6 +2,8 @@ import { bulkUpsert, db } from '../db.ts';
 import type { GhRepo, GhSearchResponse } from '../github/types.ts';
 import { activeQueries, makeSeedContext, type SeedQuery } from '../seeds/queries.ts';
 import { mapRepoRow, REPO_COLUMNS, REPO_UPDATE_COLUMNS } from './map.ts';
+import { refreshOrganizations } from './orgs.ts';
+import { recordStars } from './stars.ts';
 import { withSyncRun, type RunContext, type RunSummary } from './run.ts';
 
 export interface SeedOptions {
@@ -52,7 +54,11 @@ export async function seed(options: SeedOptions = {}): Promise<RunSummary> {
       );
     }
 
-    ctx.detail = { queries: perQuery, dryRun: options.dryRun ?? false };
+    // A dry run writes nothing, so it must not create organisation rows either.
+    const newOrgs = options.dryRun ? 0 : await refreshOrganizations();
+    if (newOrgs > 0) console.log(`${newOrgs} organisation(s) seen for the first time.`);
+
+    ctx.detail = { queries: perQuery, dryRun: options.dryRun ?? false, newOrgs };
   });
 }
 
@@ -95,6 +101,10 @@ async function runQuery(
     });
     written += count;
     ctx.reposUpserted += count;
+
+    // Search payloads carry stargazers_count, so discovery yields a dated sample for free. Written
+    // after the upsert because the foreign key requires the repository row to exist.
+    await recordStars(body.items.map((repo) => ({ repoId: repo.id, stars: repo.stargazers_count })));
 
     // Search never returns past 1,000 results however you paginate.
     if (body.items.length < PER_PAGE || page * PER_PAGE >= Math.min(total, 1000)) break;

@@ -10,10 +10,12 @@
  */
 
 import { RATE_LIMIT_FRAGMENT } from '../github/graphql.ts';
+import { detectContributorAgreement, type ContributorAgreement } from '../setup/agreement.ts';
 import { assembleSetupFacts, parseCompose, type SetupFacts } from '../setup/parse.ts';
 import { detectStacks } from '../setup/stack.ts';
 import {
   findCompose,
+  findContributing,
   findEnvTemplate,
   hasDevcontainerAnywhere,
   hasDockerfileAnywhere,
@@ -31,6 +33,9 @@ import {
 export const BLOB_ROLES = [
   'compose',
   'env',
+  // Added for CLA/DCO detection. One more slot in a request that was already being made, which is
+  // why the whole feature costs nothing measurable.
+  'contributing',
   'packageJson',
   'nvmrc',
   'toolVersions',
@@ -89,6 +94,7 @@ export function blobVariables(index: number, tree: RepoTree): Record<string, str
   const paths: Record<BlobRole, string | null> = {
     compose: findCompose(tree)?.path ?? null,
     env: findEnvTemplate(tree)?.path ?? null,
+    contributing: findContributing(tree)?.path ?? null,
     packageJson: first(manifestPaths(tree, 'package.json')),
     nvmrc: first(manifestPaths(tree, '.nvmrc')),
     toolVersions: first(manifestPaths(tree, '.tool-versions')),
@@ -143,9 +149,13 @@ export function mapSetupRepository(
   composeDepth: number | null;
   envDepth: number | null;
   rootFilesSeen: number;
+  contributorAgreement: ContributorAgreement | null;
+  agreementEvidence: string[];
+  contributingPath: string | null;
 } {
   const composeFound = findCompose(tree);
   const envFound = findEnvTemplate(tree);
+  const contributingFound = findContributing(tree);
   const composeText = blob(repository, 'compose');
   const compose = composeFound && composeText ? parseCompose(composeFound.path, composeText) : null;
 
@@ -177,6 +187,14 @@ export function mapSetupRepository(
     devcontainerNames: [],
   });
 
+  // A truncated tree is passed through rather than hidden: positive findings still stand, but the
+  // "nothing required" verdict has to be withheld, and only the detector can make that distinction.
+  const agreement = detectContributorAgreement({
+    contributingText: blob(repository, 'contributing'),
+    treePaths: tree.entries.map((entry) => entry.path),
+    treeTruncated: tree.truncated,
+  });
+
   return {
     ...facts,
     // The whole tree is the honest file count; the root count is kept so the change is measurable.
@@ -190,5 +208,8 @@ export function mapSetupRepository(
     ),
     composeDepth: composeFound?.depth ?? null,
     envDepth: envFound?.depth ?? null,
+    contributorAgreement: agreement.agreement,
+    agreementEvidence: agreement.evidence,
+    contributingPath: contributingFound?.path ?? null,
   };
 }

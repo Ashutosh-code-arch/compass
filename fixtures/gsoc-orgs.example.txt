@@ -1,0 +1,29 @@
+# FORMAT EXAMPLE ONLY — these are not GSoC organisations.
+#
+# This file exists to show the shape `gsoc import` expects and to give the command something to run
+# against. It is deliberately NOT a copy of any year's real participant list, because a stale or
+# invented list shipped inside the repository would be a dated curated claim that nobody checked —
+# which is exactly what `reviewed_at` and `--source` exist to prevent.
+#
+# To build a real one: open the programme's organisation list, and map each PROGRAMME NAME to its
+# GitHub login by hand. "Python Software Foundation" is not a login; `python` is. No scraper does that
+# mapping reliably, which is why this is a file and not a fetch.
+#
+#   npm run compass -- gsoc import my-list.txt --year 2026 --source "official list, read 2026-08-04"
+#
+# Rules:
+#   - one GitHub login per line
+#   - `#` starts a comment, inline or whole-line
+#   - `owner/name` is accepted and reduces to `owner`
+#   - duplicates collapse, case-insensitively
+#   - an empty file is refused, and so is one where most lines fail to parse
+
+acme
+hog
+ghost
+
+# Full names are fine; only the owner is kept.
+postgres/postgres
+
+# Logins may contain digits and single hyphens.
+web3-foundation

@@ -43,6 +43,10 @@ import {
   startJob,
   type JobOptions,
 } from './jobs.ts';
+import { checkClaims } from '../claims/check.ts';
+import { isMomentum, MOMENTUM_VERDICTS } from '../velocity/index.ts';
+import { getOrgs } from '../org/data.ts';
+import type { AssembleOrgsOptions, OrgSort } from '../org/view.ts';
 import { getLanguages, getStacks } from '../rank/data.ts';
 import { parseRepoRef, RepoNotFoundError } from '../sync/add.ts';
 import { STACK_LABELS } from '../setup/stack.ts';
@@ -78,6 +82,64 @@ export function shortlistQuery(query: Record<string, unknown>): ShortlistOptions
     minStars: positiveInt(get('min-stars')),
     maxStars: positiveInt(get('max-stars')),
     fetchLimit: positiveInt(get('fetch-limit')),
+    org: get('org'),
+    excludeClaimed: flag(get('exclude-claimed')),
+    momentum: momentumParam(get('momentum')),
+  });
+}
+
+const ORG_SORTS = new Set<OrgSort>(['attention', 'candidates', 'name']);
+
+/** Refused rather than ignored, like every other filter here. */
+function momentumParam(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isMomentum(value)) {
+    throw new BadRequest(`momentum takes one of: ${MOMENTUM_VERDICTS.join(', ')}. Got "${value}".`);
+  }
+  return value;
+}
+
+/**
+ * Query parameters for the organisation table, mirroring the CLI flags including hyphens.
+ *
+ * Bad input is refused rather than coerced, and `--gsoc` in particular: a silently dropped year filter
+ * would return every organisation in the corpus under a heading claiming they are all GSoC
+ * participants. That is the unrecognised-`--stack` failure again, in a place where the wrong answer
+ * looks more authoritative.
+ */
+export function orgsQuery(query: Record<string, unknown>): AssembleOrgsOptions {
+  const get = (name: string): string | undefined => str(query[name]);
+
+  const sort = get('sort');
+  if (sort !== undefined && !ORG_SORTS.has(sort as OrgSort)) {
+    throw new BadRequest(`Unknown sort "${sort}". Try: ${[...ORG_SORTS].join(', ')}`);
+  }
+
+  const rawGsoc = get('gsoc');
+  let gsoc: number | 'any' | undefined;
+  if (rawGsoc === 'any') {
+    gsoc = 'any';
+  } else if (rawGsoc !== undefined) {
+    // Tested for shape BEFORE parsing, so the error can mention that "any" is also valid. Handing a
+    // non-numeric value straight to positiveInt produces a true but less useful message.
+    const year = /^\d{4}$/.test(rawGsoc) ? Number(rawGsoc) : NaN;
+    if (!Number.isInteger(year) || year < 2005 || year > 2100) {
+      throw new BadRequest(`gsoc takes a four-digit year or "any", not "${rawGsoc}". GSoC began in 2005.`);
+    }
+    gsoc = year;
+  }
+
+  return defined({
+    sort: sort as OrgSort | undefined,
+    limit: positiveInt(get('limit')),
+    offset: nonNegativeInt(get('offset')),
+    filters: defined({
+      gsoc,
+      momentum: momentumParam(get('momentum')),
+      language: get('language'),
+      minRepos: positiveInt(get('min-repos')),
+      uncoveredOnly: flag(get('uncovered')),
+    }),
   });
 }
 
@@ -158,6 +220,42 @@ export function buildServer(options: BuildOptions = {}): FastifyInstance {
       return view;
     },
   );
+
+  /**
+   * Is this issue actually free?
+   *
+   * POST rather than GET, because it spends a request against the GitHub rate limit and writes a row.
+   * A GET that a browser or a prefetcher could fire on its own would drain the budget answering
+   * questions nobody asked, and this endpoint has to be something the person chose to do.
+   *
+   * `?cached=true` returns an earlier verdict without fetching.
+   */
+  app.post<{ Params: { owner: string; name: string; number: string }; Querystring: Record<string, unknown> }>(
+    '/api/issues/:owner/:name/:number/claims',
+    async (request, reply) => {
+      const { owner, name, number } = request.params;
+      if (!/^\d+$/.test(number)) throw new BadRequest(`Issue number must be numeric, got "${number}"`);
+
+      const check = await checkClaims(`${owner}/${name}#${number}`, {
+        allowCache: flag(str(request.query['cached'])) ?? false,
+      });
+      if (!check) {
+        return reply.code(404).send({
+          error: 'not in the corpus',
+          detail: `${owner}/${name}#${number} is not a synced issue.`,
+        });
+      }
+      return check;
+    },
+  );
+
+  /**
+   * The organisation table: the rollup, the GSoC calendar line, and the coverage notices.
+   *
+   * The primary object for someone who does not yet know which organisations exist. The shortlist,
+   * filtered by `?org=`, is what they drill into afterwards.
+   */
+  app.get('/api/orgs', async (request) => getOrgs(orgsQuery(request.query as Record<string, unknown>)));
 
   /** Canonical language names with repo counts, so the UI offers a list instead of a text box. */
   app.get('/api/languages', async () => ({ languages: await getLanguages() }));

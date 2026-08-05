@@ -7,6 +7,7 @@
  * `languagePoints` is empty-means-defaults rather than empty-means-nothing-scores.
  */
 
+import { isWeightSet, WEIGHT_SETS, type WeightSetName } from './weight_sets.ts';
 import { LANGUAGE_POINTS } from './weights.ts';
 
 export const SETUP_WEIGHTS = ['light', 'moderate', 'heavy'] as const;
@@ -24,6 +25,14 @@ export interface Profile {
   minStars: number | null;
   maxStars: number | null;
   maxSetupWeight: SetupWeight | null;
+  /**
+   * Which named weight set to score against. Null is the default set.
+   *
+   * A whole set rather than more preference points, because the thing `career-leverage` needs to do is
+   * REMOVE a penalty, and preference points can only add. Offsetting a −6 with a +6 would have worked
+   * arithmetically and produced a breakdown showing two contradictory lines, which is worse than either.
+   */
+  weightSet: WeightSetName | null;
 }
 
 export const EMPTY_PROFILE: Profile = {
@@ -34,6 +43,7 @@ export const EMPTY_PROFILE: Profile = {
   minStars: null,
   maxStars: null,
   maxSetupWeight: null,
+  weightSet: null,
 };
 
 /**
@@ -48,6 +58,7 @@ export const MAX_PREFERENCE_POINTS = 25;
 
 /** The scoring view of a profile: defaults already resolved, so scoring never reaches for a constant. */
 export interface ResolvedProfile {
+  weightSet: WeightSetName;
   languagePoints: Record<string, number>;
   topicPoints: Record<string, number>;
   avoidTopics: string[];
@@ -64,6 +75,7 @@ export interface ResolvedProfile {
 export function resolveProfile(profile: Profile = EMPTY_PROFILE): ResolvedProfile {
   const hasLanguages = Object.keys(profile.languagePoints).length > 0;
   return {
+    weightSet: profile.weightSet ?? 'default',
     languagePoints: hasLanguages ? lowerKeys(profile.languagePoints) : lowerKeys(LANGUAGE_POINTS),
     topicPoints: lowerKeys(profile.topicPoints),
     avoidTopics: profile.avoidTopics.map(normaliseTerm),
@@ -104,6 +116,7 @@ export function parseProfile(input: unknown): Profile {
     minStars: count(body['minStars'], 'minStars'),
     maxStars: count(body['maxStars'], 'maxStars'),
     maxSetupWeight: setupWeight(body['maxSetupWeight']),
+    weightSet: weightSetOf(body['weightSet']),
   };
 
   if (
@@ -164,6 +177,15 @@ function count(value: unknown, field: string): number | null {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
     throw new ProfileError(`${field} must be a whole number of zero or more`);
+  }
+  return value;
+}
+
+/** Refused rather than coerced: an unknown set silently falling back to default would be a lie. */
+function weightSetOf(value: unknown): WeightSetName | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !isWeightSet(value)) {
+    throw new ProfileError(`weightSet must be one of: ${WEIGHT_SETS.join(', ')}`);
   }
   return value;
 }

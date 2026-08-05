@@ -1,0 +1,6 @@
+# FORMAT EXAMPLE ONLY - these are not ROSS Index organisations.
+Rank,Repository,Organization,Stars,Growth,Founded,Location,Funding
+1,acme/widgets,Acme Inc,42000,4.2,2021,"Palo Alto, CA",YC W22
+2,github.com/hog/monopoly,Hog Labs,95000,11.7,2026,"London, UK",Series A
+3,ghost/townn,Ghost Town,2600,0.9,2019,"Berlin, DE",
+4,cern-hsf,CERN HSF,,,,"Geneva, CH",

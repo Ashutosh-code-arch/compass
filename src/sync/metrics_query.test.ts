@@ -50,7 +50,7 @@ const SCHEMA = buildSchema(`
     reviews(first: Int): PullRequestReviewConnection
     comments(first: Int): IssueCommentConnection
   }
-  type PullRequestConnection { nodes: [PullRequest] }
+  type PullRequestConnection { totalCount: Int!, nodes: [PullRequest] }
   type UserConnection { nodes: [User] }
 
   type Repository {

@@ -322,6 +322,19 @@ function Corpus({ corpus }: { corpus: SyncStatus['corpus'] }) {
     ['With setup read', `${corpus.reposWithSetup.toLocaleString()} of ${corpus.repos.toLocaleString()}`],
     ['Metadata over a day old', `${corpus.staleMetadata.toLocaleString()} of ${active.toLocaleString()} active`],
     ['Decisions recorded', corpus.decisions.toLocaleString()],
+    ['Organisations', corpus.organizations.toLocaleString()],
+    // Nothing reads star history yet. It is shown because a table filling up invisibly is one
+    // somebody later decides to add again, and because the span is the only honest answer to "when
+    // will velocity mean anything" — which is: not until these samples are weeks apart.
+    [
+      'Star history',
+      corpus.starSamples === 0
+        ? 'none yet'
+        : `${corpus.starSamples.toLocaleString()} samples` +
+          (corpus.starSpanDays !== null && corpus.starSpanDays >= 1
+            ? ` over ${corpus.starSpanDays} days`
+            : ' from today'),
+    ],
   ];
   return (
     <div className="corpus">

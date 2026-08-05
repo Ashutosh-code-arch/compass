@@ -8,6 +8,7 @@ import {
   TRACTABLE_LABELS,
   WEIGHTS,
 } from './weights.ts';
+import { resolveWeights, type Weights } from './weight_sets.ts';
 
 /** Everything the score can see. Nullable fields mean "not measured", never "zero". */
 export interface Candidate {
@@ -42,6 +43,39 @@ export interface Candidate {
   taskRunner: string | null;
   hasContributing: boolean | null;
   ciRunsOnPr: boolean | null;
+  /**
+   * cla | dco | both | none, or null for unmeasured.
+   *
+   * Carried but deliberately NOT scored. Whether a CLA is a blocker or an irrelevance is entirely a
+   * property of the person, not of the project — an employee of a company with a signed corporate
+   * agreement pays nothing for it, and someone else cannot contribute at all. A weight would encode
+   * one of those as universal. It is shown, and Phase 4's profile is where it becomes a filter.
+   */
+  contributorAgreement: string | null;
+
+  /**
+   * Current state: facts that DECAY, and none of which is scored.
+   *
+   * Phase 2 adds five of these and deliberately adds no weights. Two reasons, and the second is the
+   * real one.
+   *
+   * First, a claim verdict exists only for issues somebody has checked. Scoring it would rank a checked
+   * issue differently from an identical unchecked one, for reasons that have nothing to do with either
+   * issue — the ordering would encode how you had spent your requests.
+   *
+   * Second, and more importantly: the weights already in `weights.ts` are beliefs written as
+   * arithmetic and NOT ONE of them has been validated against an outcome. Adding six more unvalidated
+   * numbers would not make the ranking better, it would make it harder to tell whether it works at
+   * all. These are shown next to the score, with their age, and the reader decides.
+   */
+  updatedAtGh: string | null;
+  /** Every open pull request in the repository. Not `open_prs`, which counts a sampled subset. */
+  openPrTotal: number | null;
+  oldestOpenPrAt: string | null;
+  /** From the on-demand claim cache. Null means never checked, which is not the same as free. */
+  claimVerdict: string | null;
+  claimCheckedAt: string | null;
+  claimClaimants: number | null;
 }
 
 export interface ScoreLine {
@@ -77,6 +111,10 @@ export function buildRepoContext(
   candidates: Candidate[],
   now = new Date(),
 ): Map<string, RepoContext> {
+  // Reads the default set deliberately. Repository context is built once for the whole candidate set,
+  // before any per-candidate scoring, so it cannot depend on a weight set without being rebuilt per set.
+  // The issue-mill window is a description of a pattern rather than a preference, which is why that is
+  // acceptable rather than a compromise.
   const cutoff = now.getTime() - WEIGHTS.issueMill.invitedWithinDays * DAY_MS;
   const context = new Map<string, RepoContext>();
 
@@ -120,6 +158,11 @@ export function scoreCandidate(
   context?: RepoContext,
   /** Defaults resolved by `resolveProfile`; omitting it scores against weights.ts exactly as before. */
   profile: ResolvedProfile = resolveProfile(),
+  /**
+   * The weight set. Omitting it is the default set, byte for byte what this function scored before
+   * named sets existed — verified by diffing CLI output over the dev fixture, not by inspection.
+   */
+  W: Weights = WEIGHTS,
 ): ScoredCandidate {
   const lines: ScoreLine[] = [];
   const unmeasured: string[] = [];
@@ -130,10 +173,10 @@ export function scoreCandidate(
   // --- maintainer attention ------------------------------------------------
   const thinSample = candidate.confidence === 'low' || candidate.confidence === 'none';
   const scaleRepo = (points: number): number =>
-    thinSample ? Math.round(points * WEIGHTS.lowConfidenceMultiplier) : points;
+    thinSample ? Math.round(points * W.lowConfidenceMultiplier) : points;
 
   if (candidate.responsiveness) {
-    const points = WEIGHTS.responsiveness[candidate.responsiveness] ?? 0;
+    const points = W.responsiveness[candidate.responsiveness] ?? 0;
     add('responsiveness',
       scaleRepo(points),
       `${candidate.responsiveness}${thinSample ? ` (confidence ${candidate.confidence}, halved)` : ''}` +
@@ -146,24 +189,24 @@ export function scoreCandidate(
     unmeasured.push('responsiveness');
   }
 
-  if (candidate.noResponseRate !== null && candidate.noResponseRate >= WEIGHTS.ignoreRate.threshold) {
+  if (candidate.noResponseRate !== null && candidate.noResponseRate >= W.ignoreRate.threshold) {
     add('ignore rate',
-      scaleRepo(WEIGHTS.ignoreRate.points),
+      scaleRepo(W.ignoreRate.points),
       `${Math.round(candidate.noResponseRate * 100)}% of outside PRs unanswered`,
       'repo',
     );
   }
 
   const decided = (candidate.mergedPrs ?? 0) + (candidate.closedUnmergedPrs ?? 0);
-  if (candidate.mergeRate !== null && decided >= WEIGHTS.mergeRate.minDecidedForSignal) {
+  if (candidate.mergeRate !== null && decided >= W.mergeRate.minDecidedForSignal) {
     const rate = candidate.mergeRate;
     const pct = `${Math.round(rate * 100)}% of ${decided} decided outside PRs merged`;
-    if (rate <= WEIGHTS.mergeRate.unwelcoming.threshold) {
-      add('merge rate', scaleRepo(WEIGHTS.mergeRate.unwelcoming.points), `${pct} — answers, then closes`, 'repo');
-    } else if (rate >= WEIGHTS.mergeRate.generous.threshold) {
-      add('merge rate', scaleRepo(WEIGHTS.mergeRate.generous.points), pct, 'repo');
-    } else if (rate >= WEIGHTS.mergeRate.mixed.threshold) {
-      add('merge rate', scaleRepo(WEIGHTS.mergeRate.mixed.points), pct, 'repo');
+    if (rate <= W.mergeRate.unwelcoming.threshold) {
+      add('merge rate', scaleRepo(W.mergeRate.unwelcoming.points), `${pct} — answers, then closes`, 'repo');
+    } else if (rate >= W.mergeRate.generous.threshold) {
+      add('merge rate', scaleRepo(W.mergeRate.generous.points), pct, 'repo');
+    } else if (rate >= W.mergeRate.mixed.threshold) {
+      add('merge rate', scaleRepo(W.mergeRate.mixed.points), pct, 'repo');
     }
   } else if (candidate.mergeRate === null) {
     unmeasured.push('merge rate');
@@ -184,7 +227,7 @@ export function scoreCandidate(
     ]
       .filter((part): part is string => part !== null)
       .join(', ');
-    add('setup', WEIGHTS.setupWeight[candidate.setupWeight] ?? 0, detail, 'repo');
+    add('setup', W.setupWeight[candidate.setupWeight] ?? 0, detail, 'repo');
   } else {
     unmeasured.push('setup');
   }
@@ -192,19 +235,19 @@ export function scoreCandidate(
   const mitigations: string[] = [];
   let mitigationPoints = 0;
   if (candidate.hasDevcontainer) {
-    mitigationPoints += WEIGHTS.mitigations.devcontainer;
+    mitigationPoints += W.mitigations.devcontainer;
     mitigations.push('devcontainer');
   }
   if (candidate.taskRunner && candidate.taskRunner !== 'none') {
-    mitigationPoints += WEIGHTS.mitigations.taskRunner;
+    mitigationPoints += W.mitigations.taskRunner;
     mitigations.push(candidate.taskRunner);
   }
   if (candidate.hasContributing) {
-    mitigationPoints += WEIGHTS.mitigations.contributing;
+    mitigationPoints += W.mitigations.contributing;
     mitigations.push('CONTRIBUTING');
   }
   if (candidate.ciRunsOnPr === true) {
-    mitigationPoints += WEIGHTS.mitigations.ciOnPullRequest;
+    mitigationPoints += W.mitigations.ciOnPullRequest;
     mitigations.push('CI on PRs');
   }
   add('onboarding', mitigationPoints, mitigations.join(', '), 'repo');
@@ -231,27 +274,27 @@ export function scoreCandidate(
 
   const avoidedTopic = topics.find((topic) => profile.avoidTopics.includes(topic));
   if (avoidedTopic) {
-    add('avoided subject', WEIGHTS.avoidLabel, `tagged "${avoidedTopic}"`, 'repo');
+    add('avoided subject', W.avoidLabel, `tagged "${avoidedTopic}"`, 'repo');
   }
 
   // --- labels --------------------------------------------------------------
   const invited = labelMatch(candidate.labels, INVITED_LABELS);
-  if (invited) add('invited', WEIGHTS.invitedLabel, `labelled "${invited}"`, 'issue');
+  if (invited) add('invited', W.invitedLabel, `labelled "${invited}"`, 'issue');
 
   const tractable = labelMatch(candidate.labels, TRACTABLE_LABELS);
-  if (tractable && !invited) add('tractable', WEIGHTS.tractableLabel, `labelled "${tractable}"`, 'issue');
+  if (tractable && !invited) add('tractable', W.tractableLabel, `labelled "${tractable}"`, 'issue');
 
   // Profile terms extend the built-in list rather than replacing it: the built-ins encode structural
   // problems (needs-design, blocked) that are worth avoiding whatever you happen to like.
   const avoid = labelMatch(candidate.labels, [...AVOID_LABELS, ...profile.avoidLabels]);
-  if (avoid) add('avoid', WEIGHTS.avoidLabel, `labelled "${avoid}"`, 'issue');
+  if (avoid) add('avoid', W.avoidLabel, `labelled "${avoid}"`, 'issue');
 
   // --- contention ----------------------------------------------------------
-  if (candidate.commentCount <= WEIGHTS.comments.quiet.atMost) {
-    add('uncontested', WEIGHTS.comments.quiet.points, `${candidate.commentCount} comment${candidate.commentCount === 1 ? '' : 's'}`, 'issue');
-  } else if (candidate.commentCount >= WEIGHTS.comments.busy.atLeast) {
+  if (candidate.commentCount <= W.comments.quiet.atMost) {
+    add('uncontested', W.comments.quiet.points, `${candidate.commentCount} comment${candidate.commentCount === 1 ? '' : 's'}`, 'issue');
+  } else if (candidate.commentCount >= W.comments.busy.atLeast) {
     add('contested',
-      WEIGHTS.comments.busy.points,
+      W.comments.busy.points,
       `${candidate.commentCount} comments — likely already being worked or argued over`,
       'issue',
     );
@@ -259,23 +302,23 @@ export function scoreCandidate(
 
   // --- age -----------------------------------------------------------------
   const ageDays = Math.floor((now.getTime() - new Date(candidate.createdAtGh).getTime()) / DAY_MS);
-  if (ageDays <= WEIGHTS.age.fresh.withinDays) {
-    add('fresh', WEIGHTS.age.fresh.points, `opened ${ageDays}d ago`, 'issue');
-  } else if (ageDays >= WEIGHTS.age.stale.afterDays) {
-    add('stale', WEIGHTS.age.stale.points, `open for ${Math.round(ageDays / 365)}y`, 'issue');
+  if (ageDays <= W.age.fresh.withinDays) {
+    add('fresh', W.age.fresh.points, `opened ${ageDays}d ago`, 'issue');
+  } else if (ageDays >= W.age.stale.afterDays) {
+    add('stale', W.age.stale.points, `open for ${Math.round(ageDays / 365)}y`, 'issue');
   }
 
   // --- specification quality -----------------------------------------------
   if (candidate.authorAssociation && ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(candidate.authorAssociation)) {
-    add('maintainer-filed', WEIGHTS.authoredByMaintainer, candidate.authorAssociation.toLowerCase(), 'issue');
+    add('maintainer-filed', W.authoredByMaintainer, candidate.authorAssociation.toLowerCase(), 'issue');
   }
 
-  if (candidate.bodyLength < WEIGHTS.body.thin.underChars) {
-    add('thin description', WEIGHTS.body.thin.points, `${candidate.bodyLength} chars`, 'issue');
-  } else if (candidate.bodyLength > WEIGHTS.body.sprawling.overChars) {
-    add('sprawling', WEIGHTS.body.sprawling.points, `${candidate.bodyLength} chars — a spec, not a task`, 'issue');
-  } else if (candidate.bodyLength > WEIGHTS.body.substantial.overChars) {
-    add('detailed', WEIGHTS.body.substantial.points, `${candidate.bodyLength} chars`, 'issue');
+  if (candidate.bodyLength < W.body.thin.underChars) {
+    add('thin description', W.body.thin.points, `${candidate.bodyLength} chars`, 'issue');
+  } else if (candidate.bodyLength > W.body.sprawling.overChars) {
+    add('sprawling', W.body.sprawling.points, `${candidate.bodyLength} chars — a spec, not a task`, 'issue');
+  } else if (candidate.bodyLength > W.body.substantial.overChars) {
+    add('detailed', W.body.substantial.points, `${candidate.bodyLength} chars`, 'issue');
   }
 
   // --- scope ---------------------------------------------------------------
@@ -290,21 +333,21 @@ export function scoreCandidate(
 
   // --- issue mill ----------------------------------------------------------
   // Visible only across issues: a burst of invited-label tasks opened together.
-  if (context && context.invitedRecent >= WEIGHTS.issueMill.atLeast) {
+  if (context && context.invitedRecent >= W.issueMill.atLeast) {
     add(
       'issue mill',
-      WEIGHTS.issueMill.points,
+      W.issueMill.points,
       `${context.invitedRecent} invited issues opened here within ` +
-        `${WEIGHTS.issueMill.invitedWithinDays}d — looks auto-generated`,
+        `${W.issueMill.invitedWithinDays}d — looks auto-generated`,
       'repo',
     );
   }
 
   // --- project size --------------------------------------------------------
-  if (candidate.stars > WEIGHTS.stars.huge.over) {
-    add('very large project', WEIGHTS.stars.huge.points, `${candidate.stars.toLocaleString()} stars`, 'repo');
-  } else if (candidate.stars >= WEIGHTS.stars.sweetSpot.min && candidate.stars <= WEIGHTS.stars.sweetSpot.max) {
-    add('size', WEIGHTS.stars.sweetSpot.points, `${candidate.stars.toLocaleString()} stars`, 'repo');
+  if (candidate.stars > W.stars.huge.over) {
+    add('very large project', W.stars.huge.points, `${candidate.stars.toLocaleString()} stars`, 'repo');
+  } else if (candidate.stars >= W.stars.sweetSpot.min && candidate.stars <= W.stars.sweetSpot.max) {
+    add('size', W.stars.sweetSpot.points, `${candidate.stars.toLocaleString()} stars`, 'repo');
   }
 
   const score = lines.reduce((total, line) => total + line.points, 0);
@@ -323,11 +366,15 @@ export function rankCandidates(
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
   const now = options.now ?? new Date();
   const profile = options.profile ?? resolveProfile();
+  // Resolved once per run. Every candidate in one ranking must be scored against the same set, or the
+  // ordering compares numbers from two different models.
+  const weights = resolveWeights(profile.weightSet);
   const context = buildRepoContext(candidates, now);
 
   return candidates
     .map((candidate) =>
-      scoreCandidate(candidate, now, context.get(candidate.repoFullName), profile),
+      // The set comes from the profile, resolved once per run rather than per candidate.
+      scoreCandidate(candidate, now, context.get(candidate.repoFullName), profile, weights),
     )
     .filter((scored) => scored.score >= minScore)
     .sort((a, b) => b.score - a.score);

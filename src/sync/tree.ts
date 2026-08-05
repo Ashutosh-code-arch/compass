@@ -111,6 +111,38 @@ export function findEnvTemplate(tree: RepoTree): { path: string; depth: number }
   return findByName(tree, ENV_NAMES);
 }
 
+/**
+ * The CONTRIBUTING file, wherever a project keeps it.
+ *
+ * Not `findByName`, for two reasons. The extension varies (`.md`, `.rst`, `.txt`, or none at all), so
+ * the match is on the stem. And `docs/` is in IGNORED_SEGMENTS — correctly, for compose files, since a
+ * documentation directory's compose file is not how you run the project — but `docs/CONTRIBUTING.md`
+ * is a perfectly ordinary place to state a CLA requirement, so this search allows it.
+ *
+ * Preference order is root, then `.github/`, then shallowest elsewhere: that is the order of
+ * authority, and a translated copy under `docs/i18n/` should never outrank the real one.
+ */
+export function findContributing(tree: RepoTree): { path: string; depth: number } | null {
+  let best: { path: string; depth: number; rank: number } | null = null;
+
+  for (const entry of tree.entries) {
+    if (entry.type !== 'blob') continue;
+    const lower = entry.path.toLowerCase();
+    const basename = lower.split('/').pop()!;
+    if (!basename.startsWith('contributing')) continue;
+    // Vendored copies describe someone else's project.
+    if (/(^|\/)(node_modules|vendor|third_party|thirdparty)\//.test(lower)) continue;
+
+    const depth = depthOf(entry.path);
+    const rank = depth === 0 ? 0 : lower.startsWith('.github/') ? 1 : 2;
+    if (best === null || rank < best.rank || (rank === best.rank && depth < best.depth)) {
+      best = { path: entry.path, depth, rank };
+    }
+  }
+
+  return best ? { path: best.path, depth: best.depth } : null;
+}
+
 /** A Dockerfile anywhere that is not vendored still means containers are involved. */
 export function hasDockerfileAnywhere(tree: RepoTree): boolean {
   return tree.entries.some(

@@ -22,6 +22,22 @@ export interface ShortlistFilters {
    */
   repoFullName?: string;
   /**
+   * Restrict to one organisation, matched against `repos.owner` case-insensitively.
+   *
+   * This is the drill-down the organisation table links to. Case-insensitive for the same reason
+   * `--language` is: GitHub's casing is canonical but nobody types it that way, and an exact match
+   * returning an empty shortlist looks exactly like a real answer.
+   */
+  org?: string;
+  /**
+   * Drop issues a claim check has shown to be taken.
+   *
+   * Only affects issues that have actually been checked; an unchecked issue is not evidence of
+   * anything and stays in the list. `stale-claim` also stays, because a request nobody followed up on
+   * for a fortnight is, in practice, an available issue again.
+   */
+  excludeClaimed?: boolean;
+  /**
    * Safety cap on rows fetched before scoring. Rows are small — the issue body is reduced to a
    * length in SQL — so this is generous on purpose. At the old default of 4,000 a 60,000-issue
    * corpus was silently ranked on whichever slice happened to be most recently updated.
@@ -68,9 +84,38 @@ interface CandidateRow {
   task_runner: string | null;
   has_contributing: boolean | null;
   ci_runs_on_pr: boolean | null;
+  contributor_agreement: string | null;
+  updated_at_gh: Date | null;
+  open_pr_total: number | null;
+  oldest_open_pr_at: Date | null;
+  claim_verdict: string | null;
+  claim_checked_at: Date | null;
+  claim_claimants: number | null;
 }
 
 const WEIGHT_RANK: Record<string, number> = { light: 1, moderate: 2, heavy: 3, unknown: 4 };
+
+/**
+ * The unconditional hard gates, as a SQL fragment. Expects `issues i` joined to `repos r`.
+ *
+ * Shared rather than duplicated because the organisation rollup counts open candidates per
+ * organisation, and if that count is computed from a second copy of these conditions the two drift
+ * and the org screen quietly disagrees with the shortlist it links to. `candidates.test.ts` asserts
+ * both queries reference this constant.
+ *
+ * What is deliberately NOT here: the dormant filter. The shortlist excludes dormant repositories
+ * because no combination of good labels compensates for nobody reading your PR. The org table has the
+ * opposite job — "this GSoC organisation has 40 open issues and has not replied to an outsider in 31
+ * days" is the single most valuable row it can show, and hiding it would defeat the purpose. So that
+ * gate stays parameterised at the shortlist's call site.
+ */
+export const CANDIDATE_GATES = `i.state = 'open'
+          -- somebody else's work, not a weak candidate
+          and i.assignee_logins = '{}'
+          and not i.is_locked
+          and r.sync_state = 'active'
+          -- already judged: the journal is what keeps the shortlist from repeating itself
+          and not exists (select 1 from decisions d where d.issue_id = i.id)`;
 
 /**
  * Hard gates live in SQL; preferences live in the score.
@@ -113,18 +158,23 @@ export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<C
               f.has_devcontainer,
               f.task_runner,
               f.has_contributing,
-              f.ci_runs_on_pr
+              f.ci_runs_on_pr,
+              f.contributor_agreement,
+              i.updated_at_gh,
+              m.open_pr_total,
+              m.oldest_open_pr_at,
+              -- Whatever is already known about claims. Costs nothing: this is a cache of checks you
+              -- have already paid for, and it is what makes checking an issue worth doing more than
+              -- once.
+              cl.verdict     as claim_verdict,
+              cl.checked_at  as claim_checked_at,
+              cl.claimants   as claim_claimants
          from issues i
          join repos r on r.id = i.repo_id
          left join repo_metrics m on m.repo_id = i.repo_id
          left join setup_facts  f on f.repo_id = i.repo_id
-        where i.state = 'open'
-          -- somebody else's work, not a weak candidate
-          and i.assignee_logins = '{}'
-          and not i.is_locked
-          and r.sync_state = 'active'
-          -- already judged: the journal is what keeps the shortlist from repeating itself
-          and not exists (select 1 from decisions d where d.issue_id = i.id)
+         left join issue_claims cl on cl.issue_id = i.id
+        where ${CANDIDATE_GATES}
           and ($1::boolean or coalesce(m.responsiveness, 'unknown') <> 'dormant')
           -- Case-insensitive: GitHub's casing is canonical ("TypeScript"), but nobody types it that
           -- way, and an exact match silently returned an empty shortlist for "typescript".
@@ -135,6 +185,13 @@ export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<C
                or coalesce(($6::jsonb ->> coalesce(f.setup_weight, 'unknown'))::int, 4) <= $5)
           and (not $7::boolean or i.labels && $8::text[])
           and ($10::text is null or r.full_name = $10)
+          and ($14::text is null or lower(r.owner) = lower($14))
+          -- Excludes only what has been CHECKED and found taken. An unchecked issue stays in: it has
+          -- not been shown to be free, and dropping it would quietly turn this into "only issues I
+          -- have already spent a request on".
+          and (not $15::boolean
+               or cl.verdict is null
+               or cl.verdict in ('free', 'stale-claim'))
           -- Stack: any of detected frameworks, declared topics, or primary language.
           --
           -- $13 says a stack was ASKED FOR, which is not the same as the resolved arrays being
@@ -161,6 +218,8 @@ export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<C
         stack.stacks,
         stack.languages.map((language) => language.toLowerCase()),
         filters.stack !== undefined && filters.stack !== '',
+        filters.org ?? null,
+        filters.excludeClaimed ?? false,
       ],
     )
   ).rows;
@@ -193,6 +252,13 @@ export async function fetchCandidates(filters: ShortlistFilters = {}): Promise<C
     taskRunner: row.task_runner,
     hasContributing: row.has_contributing,
     ciRunsOnPr: row.ci_runs_on_pr,
+    contributorAgreement: row.contributor_agreement,
+    updatedAtGh: row.updated_at_gh === null ? null : row.updated_at_gh.toISOString(),
+    openPrTotal: row.open_pr_total,
+    oldestOpenPrAt: row.oldest_open_pr_at === null ? null : row.oldest_open_pr_at.toISOString(),
+    claimVerdict: row.claim_verdict,
+    claimCheckedAt: row.claim_checked_at === null ? null : row.claim_checked_at.toISOString(),
+    claimClaimants: row.claim_claimants,
   }));
 }
 

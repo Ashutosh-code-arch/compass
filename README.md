@@ -47,12 +47,106 @@ Four things, all from public GitHub data. No AI, no language model, no guessing.
 | | Question | How |
 |---|---|---|
 | **Maintainer attention** | Do they review pull requests from strangers, how fast, and do they merge them? | Reads the last 180 days of external pull requests |
-| **Setup cost** | How much work before you can run the tests? | Reads compose files, env templates, task runners, CI config |
+| **Setup cost** | How much work before you can run the tests, and is there paperwork? | Reads compose files, env templates, task runners, CI config, and any CLA or DCO requirement |
 | **Issue signals** | Is this issue inviting, specified, and unclaimed? | Labels, body length, comment count, age, who filed it |
 | **Your preferences** | Languages and subjects you want, and things to avoid | You set these in the app |
 
 Two of those are measurements. Two are opinions. **The tool is careful about which is which**, and so
 should you be — see [How ranking works](docs/how-ranking-works.md).
+
+A fifth thing is shown but never scored: **what your own journal already says about a project.** Four
+rejections in one repository for "needs design discussion first" is that repository telling you
+something, and it appears beside the row — as a report of what you did, not as a prediction. Nothing
+has validated it as predictive, so it stays out of the arithmetic.
+
+## Hot is not the same as contributable
+
+Every discovery tool ranks open source by stars or by growth. That ranking is close to useless for a
+contributor, and the reason is not subtle: a project that went from nothing to 119,000 stars in nine months
+has thousands of drive-by pull requests, one or two maintainers, and no capacity to review yours.
+
+```bash
+npm run compass -- orgs --momentum rising
+```
+
+Compass measures growth **from its own star history** — dated, yours, and covering repositories no index
+lists — and then crosses it with whether anyone actually merges outside work:
+
+| | Growth surging | Growth normal |
+|---|---|---|
+| **Maintainers reading outside PRs** | `rising` — the best place to be early | `steady` |
+| **They are not** | `hype` — avoid | `cooling` / `steady` |
+
+`hype` is never reached from growth alone. "This project is popular" is not a criticism, so the verdict also
+requires a measured capacity concern: dormant or slow replies, a hundred or more open pull requests, or a
+merge rate at or below 40% over at least ten decided ones.
+
+The combination is the point. Velocity finds what is hot; the responsiveness engine is the only thing that
+says whether hot is contributable. In testing, a repository came out `hype` while its replies read
+*responsive* — because it had 214 open pull requests and the oldest had waited 840 days.
+
+A dash means **unmeasured**, never "not growing". Velocity needs two star samples a week or more apart, so a
+freshly discovered repository has none.
+
+## Is it actually free?
+
+The largest remaining way to waste an evening is not picking a bad issue. It is picking one somebody else
+is already doing.
+
+```bash
+npm run compass -- claims acme/widgets#412
+```
+
+```
+  CONTESTED — several people have asked and nobody was assigned
+  This is the pattern that wastes evenings: a queue of volunteers and no assignment. Unless you
+  want to race, spend the time elsewhere.
+
+  checked just now
+  read all 41 comment(s)
+
+  7 person(s) asked:
+    ada 3 days ago — asked to take it
+      "Can I work on this?"
+```
+
+A `good first issue` with 23 comments is usually twenty people asking "can I work on this?" and one
+person three days in without an assignment. GitHub's assignee field is empty in every one of those
+cases, so a label-based list — including this tool's own shortlist until now — calls the whole pile free
+work.
+
+One request, only for the issue you actually open, and the answer is cached so `shortlist
+--exclude-claimed` can act on it afterwards. **A verdict is true as of the moment it was made** and is
+never shown without its age: `free` from three weeks ago is nearly worthless. An issue nobody has checked
+reads as unknown, never as free.
+
+## Organisations first
+
+The question actually asked first is not "which issue" but **"which organisations are worth my
+time?"** — and someone wanting to contribute to a growing, well-regarded project usually does not know
+which organisations exist.
+
+```bash
+npm run compass -- orgs --gsoc 2026
+```
+
+```
+Organisation              Maintainers reply?          Merge rate       Setup                 Open    GSoC
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+hog                       responsive · 9h             86% of 14        1 light               6       2026
+acme                      slow 1/2 · 34h              76% of 37        1 light 1 mod         5       2026
+                          CLA in 1 of 2 repos — resolve before writing code
+cern-hsf                  not in corpus               —                —                     0       2026
+```
+
+Every aggregator lists issues carrying a label, and the official GSoC page gives a description and some
+technology tags. **None of them measures whether maintainers merge work from outsiders.** That is what
+the three middle columns are, and it is the only thing that answers "will anyone read my pull request".
+
+Nothing in that table is a score. The ordering is an ordinal cascade — verdict, merge rate, available
+work — so any position can be explained by pointing at a column. Merge rate always carries its
+denominator, because `100% of 2` and `76% of 37` are not the same claim. Setup is a distribution rather
+than an average, because those are ordinals. Then `shortlist --org hog` to drill in.
 
 ---
 
@@ -179,7 +273,7 @@ applied 002_maintainer_metrics.sql
 applied 008_stacks_and_full_tree.sql
 ```
 
-Run it again and it will say `Up to date (8 migration(s) applied).` — it is safe to run any number of
+Run it again and it will say `Up to date (13 migration(s) applied).` — it is safe to run any number of
 times.
 
 ### Step 5 — Start the app

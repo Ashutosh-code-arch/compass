@@ -37,6 +37,15 @@ Live data as of handoff:
 - **decisions: 0 rows** ← the thing that would make any weight defensible
 - ~14 large repos still resuming their issue backfill page by page
 
+## 0. Start with HANDOFF-NEXT.md
+
+`HANDOFF-NEXT.md` in the root supersedes this file for anyone picking the project up cold. It carries
+the current state, the strategic reframe (org-first discovery, the GSoC wedge, personal rather than a
+platform), and the phase plan. `docs/roadmap.md` has the phase detail.
+
+This file is kept for the per-slice history and the accumulated GitHub API lore, which is still the most
+expensive knowledge here to rediscover.
+
 ## 1a. Where the documentation lives
 
 This file is the working document for resuming mid-project. User-facing documentation now lives
